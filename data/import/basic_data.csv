@@ -1,0 +1,29 @@
+no,country,EU_country_abbrivation,accession,population_2023,area_km2,largest_city,gdp_usd_m_2023,gdp_ppp_percapita_2023_imf,currency,hdi_2023_udi,meps_2020,meps_2024,official_languages
+1,Austria,AT,1 January 1995,9104772,83855,Vienna,516049,56.68,euro,0.926,19,20,"German, in some regions: Burgenland-Croatian,
+Slovenian, Hungarian"
+2,Belgium,BE,Founder,11754004,30528,Brussels,632235,53.84,euro,0.942,21,22,"Dutch, French, German"
+3,Bulgaria,BG,1 January 2007,6447710,110994,Sofia,101586,15.76,lev,0.799,17,17,Bulgarian
+4,Croatia,HR,1 July 2013,3850894,56594,Zagreb,82022,21.30,euro,0.878,12,12,Croatian
+5,Cyprus,CY,1 May 2004,920701,9251,Nicosia,32231,35.01,euro,0.907,6,6,Greek
+6,Czech_Republic,CZ,1 May 2004,10827529,78866,Prague,330842,30.56,koruna,0.895,21,21,Czech
+7,Denmark,DK,1 January 1973,5932654,43075,Copenhagen,404141,68.12,krone,0.952,14,15,Danish
+8,Estonia,EE,1 May 2004,1365884,45227,Tallinn,40746,29.83,euro,0.899,7,7,Estonian
+9,Finland,FI,1 January 1995,5563970,338424,Helsinki,300196,53.95,euro,0.942,14,15,"Finnish, Swedish"
+10,France,FR,Founder,68070697,632833,Paris,3030992,44.46,euro,0.910,79,81,French
+11,Germany,DE,Founder,84358845,357386,Berlin,4456210,52.82,euro,0.950,96,96,German
+12,Greece,EL,1 January 1981,10394055,131990,Athens,238213,22.87,euro,0.893,21,21,Greek
+13,Hungary,HU,1 May 2004,9597085,93030,Budapest,212358,22.12,forint,0.851,21,21,Hungarian
+14,Ireland,IE,1 January 1973,5194336,70273,Dublin,545645,103.51,euro,0.950,13,14,"English, Irish"
+15,Italy,IT,Founder,58850717,301338,Rome,2254917,38.22,euro,0.906,76,76,Italian
+16,Latvia,LV,1 May 2004,1883008,64589,Riga,43628,23.17,euro,0.879,8,9,Latvian
+17,Lithuania,LT,1 May 2004,2857279,65200,Vilnius,77839,27.24,euro,0.879,11,11,Lithuanian
+18,Luxembourg,LU,Founder,660809,2586,Luxembourg,85757,129.78,euro,0.927,6,6,"French, German"
+19,Malta,MT,1 May 2004,542051,316,St. Paul's Bay,20958,38.66,euro,0.915,6,6,"Maltese, English"
+20,Netherlands,NL,Founder,17811291,41543,Amsterdam,1118157,62.78,euro,0.946,29,31,Dutch
+21,Poland,PL,1 May 2004,36753736,312685,Warsaw,811841,22.09,złoty,0.881,52,53,Polish
+22,Portugal,PT,1 January 1986,10467366,92212,Lisbon,287088,27.43,euro,0.874,21,21,Portuguese
+23,Romania,RO,1 January 2007,19051562,238391,Bucharest,350966,18.42,leu,0.827,33,33,Romanian
+24,Slovakia,SK,1 May 2004,5428792,49035,Bratislava,132797,24.46,euro,0.855,14,15,Slovak
+25,Slovenia,SI,1 May 2004,2116792,20273,Ljubljana,68219,32.23,euro,0.926,8,9,Slovene
+26,Spain,ES,1 January 1986,48059777,504030,Madrid,1580741,32.53,euro,0.911,59,61,Spanish
+27,Sweden,SE,1 January 1995,10521556,449964,Stockholm,592956,56.36,krona,0.952,21,21,Swedish
