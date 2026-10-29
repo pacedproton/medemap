@@ -1,0 +1,343 @@
+/**
+ * Abstract LLM Service
+ *
+ * This service provides a unified interface for all LLM providers
+ * and handles provider switching, fallbacks, and configuration
+ */
+
+import { LLMProvider, LLMConfig, LLMResponse, LLMError, LLMConnectionError } from './types';
+import { logger } from '../../logging/logger';
+import { ViewContext, AIFunctionCall } from '../ollamaService';
+import { OllamaProvider } from './providers/OllamaProvider';
+import { OpenAIProvider } from './providers/OpenAIProvider';
+import { ClaudeProvider } from './providers/ClaudeProvider';
+
+export class LLMService {
+  private providers: Map<string, LLMProvider> = new Map();
+  private primaryProvider: LLMProvider | null = null;
+  private fallbackProviders: LLMProvider[] = [];
+  private config: LLMConfig | null = null;
+
+  constructor() {
+    this.registerDefaultProviders();
+  }
+
+  // ============================================================================
+  // Provider Registration & Management
+  // ============================================================================
+
+  private registerDefaultProviders() {
+    this.providers.set('ollama', new OllamaProvider());
+    this.providers.set('openai', new OpenAIProvider());
+    this.providers.set('claude', new ClaudeProvider());
+  }
+
+  registerProvider(name: string, provider: LLMProvider) {
+    this.providers.set(name, provider);
+  }
+
+  async initialize(config: LLMConfig, fallbackConfigs?: LLMConfig[]) {
+    this.config = config;
+
+    // Initialize primary provider
+    const provider = this.providers.get(config.provider);
+    if (!provider) {
+      throw new LLMError(`Unknown provider: ${config.provider}`, config.provider);
+    }
+
+    try {
+      await provider.initialize(config);
+      this.primaryProvider = provider;
+      logger.info(`LLM Service: Primary provider ${config.provider} initialized`);
+    } catch (error) {
+      logger.error(`Failed to initialize primary provider ${config.provider}:`, error);
+      throw error;
+    }
+
+    // Initialize fallback providers
+    if (fallbackConfigs) {
+      for (const fallbackConfig of fallbackConfigs) {
+        const fallbackProvider = this.providers.get(fallbackConfig.provider);
+        if (fallbackProvider) {
+          try {
+            await fallbackProvider.initialize(fallbackConfig);
+            this.fallbackProviders.push(fallbackProvider);
+            logger.info(`LLM Service: Fallback provider ${fallbackConfig.provider} initialized`);
+          } catch (error) {
+            logger.warning(`Failed to initialize fallback provider ${fallbackConfig.provider}:`, error);
+          }
+        }
+      }
+    }
+  }
+
+  // ============================================================================
+  // Main API Methods
+  // ============================================================================
+
+  async parseQuery(query: string, context: ViewContext, disableFallback: boolean = false): Promise<{
+    functionCalls: AIFunctionCall[];
+    explanation: string;
+    confidence: number;
+    suggestedFollowUps?: string[];
+    provider: string;
+  }> {
+    // If fallback is disabled, use ONLY the primary provider
+    const providers = disableFallback
+      ? [this.primaryProvider].filter(Boolean)
+      : [this.primaryProvider, ...this.fallbackProviders].filter(Boolean);
+
+    logger.info(`LLMService: parseQuery with disableFallback=${disableFallback}, using ${providers.length} provider(s)`);
+
+    for (const provider of providers) {
+      try {
+        if (!await provider.isAvailable()) {
+          const message = `Provider ${provider.name} not available`;
+          if (disableFallback) {
+            // If fallback is disabled and primary provider is unavailable, fail immediately
+            throw new LLMConnectionError(provider.name, message);
+          }
+          logger.warning(`${message}, trying next...`);
+          continue;
+        }
+
+        logger.info(`LLMService: Using provider ${provider.name}`);
+        const response = await provider.parseQuery(query, context);
+
+        // Extract explanation and suggestions from the response
+        let explanation = response.content;
+        let suggestedFollowUps = response.suggestedFollowUps;
+
+        try {
+          // If content is JSON, extract the fields
+          const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (parsed.explanation) {
+              explanation = parsed.explanation;
+            }
+            if (parsed.suggestedFollowUps && Array.isArray(parsed.suggestedFollowUps)) {
+              suggestedFollowUps = parsed.suggestedFollowUps;
+            }
+          }
+        } catch (e) {
+          // Use full content as fallback
+        }
+
+        logger.info(`LLMService: Success with provider ${provider.name}`);
+        return {
+          functionCalls: response.functionCalls || [],
+          explanation: explanation,
+          confidence: this.calculateConfidence(response),
+          suggestedFollowUps: suggestedFollowUps || this.generateSuggestions(query, context),
+          provider: provider.name
+        };
+      } catch (error) {
+        logger.error(`Provider ${provider.name} failed:`, error);
+
+        // If fallback is disabled or this is the last provider, throw the error
+        if (disableFallback || provider === providers[providers.length - 1]) {
+          throw error;
+        }
+        // Otherwise, continue to next provider
+      }
+    }
+
+    throw new LLMConnectionError('all', 'All LLM providers failed');
+  }
+
+  async checkConnection(): Promise<{
+    primary: { connected: boolean; provider: string; error?: string };
+    fallbacks: Array<{ connected: boolean; provider: string; error?: string }>;
+  }> {
+    const result = {
+      primary: { connected: false, provider: this.primaryProvider?.name || 'none', error: undefined as string | undefined },
+      fallbacks: [] as Array<{ connected: boolean; provider: string; error?: string }>
+    };
+
+    // Check primary provider
+    if (this.primaryProvider) {
+      try {
+        result.primary.connected = await this.primaryProvider.isAvailable();
+      } catch (error) {
+        result.primary.error = error.message;
+      }
+    }
+
+    // Check fallback providers
+    for (const provider of this.fallbackProviders) {
+      try {
+        const connected = await provider.isAvailable();
+        result.fallbacks.push({ connected, provider: provider.name });
+      } catch (error) {
+        result.fallbacks.push({
+          connected: false,
+          provider: provider.name,
+          error: error.message
+        });
+      }
+    }
+
+    return result;
+  }
+
+  // ============================================================================
+  // Provider Management
+  // ============================================================================
+
+  async switchProvider(config: LLMConfig, clearFallbacks: boolean = false): Promise<void> {
+    const provider = this.providers.get(config.provider);
+    if (!provider) {
+      throw new LLMError(`Unknown provider: ${config.provider}`, config.provider);
+    }
+
+    await provider.initialize(config);
+    this.primaryProvider = provider;
+    this.config = config;
+
+    // Clear fallback providers if requested (for exclusive provider use)
+    if (clearFallbacks) {
+      this.fallbackProviders = [];
+      logger.info(`LLM Service: Switched to provider ${config.provider} with fallbacks cleared`);
+    } else {
+      logger.info(`LLM Service: Switched to provider ${config.provider}`);
+    }
+  }
+
+  getAvailableProviders(): Array<{
+    name: string;
+    supportsStreaming: boolean;
+    supportsFunctionCalling: boolean;
+    supportsVision: boolean;
+  }> {
+    return Array.from(this.providers.entries()).map(([name, provider]) => ({
+      name,
+      supportsStreaming: provider.supportsStreaming,
+      supportsFunctionCalling: provider.supportsFunctionCalling,
+      supportsVision: provider.supportsVision
+    }));
+  }
+
+  getCurrentProvider(): string | null {
+    return this.primaryProvider?.name || null;
+  }
+
+  getConfig(): LLMConfig | null {
+    return this.config;
+  }
+
+  // ============================================================================
+  // Helper Methods
+  // ============================================================================
+
+  private calculateConfidence(response: LLMResponse): number {
+    // Simple confidence calculation based on response characteristics
+    let confidence = 0.5;
+
+    if (response.functionCalls && response.functionCalls.length > 0) {
+      confidence += 0.3;
+    }
+
+    if (response.content && response.content.length > 10) {
+      confidence += 0.1;
+    }
+
+    if (response.finishReason === 'stop') {
+      confidence += 0.1;
+    }
+
+    return Math.min(confidence, 1.0);
+  }
+
+  private generateSuggestions(query: string, context: ViewContext): string[] {
+    // Generate contextual suggestions based on current state
+    const suggestions = [];
+
+    if (context.currentPath.includes('dea')) {
+      suggestions.push(
+        'Add more input variables',
+        'Change to BCC model',
+        'View efficiency frontier'
+      );
+    } else if (context.currentPath.includes('choropleth')) {
+      suggestions.push(
+        'Change color scheme',
+        'Filter by region',
+        'Switch to 3D view'
+      );
+    } else {
+      suggestions.push(
+        'Show me the choropleth map',
+        'Compare Nordic countries',
+        'Analyze press freedom trends'
+      );
+    }
+
+    return suggestions.slice(0, 3);
+  }
+
+  // ============================================================================
+  // Advanced Features
+  // ============================================================================
+
+  async getProviderStatus(): Promise<Record<string, any>> {
+    const status = {};
+
+    if (this.primaryProvider) {
+      try {
+        status[this.primaryProvider.name] = await this.primaryProvider.getStatus();
+      } catch (error) {
+        status[this.primaryProvider.name] = {
+          connected: false,
+          error: error.message
+        };
+      }
+    }
+
+    for (const provider of this.fallbackProviders) {
+      try {
+        status[provider.name] = await provider.getStatus();
+      } catch (error) {
+        status[provider.name] = {
+          connected: false,
+          error: error.message
+        };
+      }
+    }
+
+    return status;
+  }
+
+  async testProvider(config: LLMConfig): Promise<{
+    success: boolean;
+    latency?: number;
+    error?: string;
+    model?: string;
+  }> {
+    const provider = this.providers.get(config.provider);
+    if (!provider) {
+      return { success: false, error: `Unknown provider: ${config.provider}` };
+    }
+
+    const start = Date.now();
+    try {
+      await provider.initialize(config);
+      const available = await provider.isAvailable();
+      const latency = Date.now() - start;
+
+      if (available) {
+        return { success: true, latency, model: config.model };
+      } else {
+        return { success: false, error: 'Provider not available' };
+      }
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+}
+
+// ============================================================================
+// Singleton Instance
+// ============================================================================
+
+export const llmService = new LLMService();

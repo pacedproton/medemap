@@ -1,0 +1,52 @@
+.container {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+}
+
+.loadingContainer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 200px;
+}
+
+.chartContainer {
+    opacity: 1;
+    transition: opacity 0.5s ease-in;
+    margin-top: 2rem;
+}
+
+.plot {
+    width: 100%;
+    height: 800px;
+}
+
+.plotSmall {
+    width: 1200px;
+    height: 400px;
+}
+
+.plotMedium {
+    width: 1200px;
+    height: 500px;
+}
+
+.plotLarge {
+    width: 1200px;
+    height: 800px;
+}
+
+.plotExtraLarge {
+    width: 1200px;
+    height: 1100px;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}

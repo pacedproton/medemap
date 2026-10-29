@@ -1,0 +1,40 @@
+.dialog {
+  border-radius: 8px;
+}
+
+.dialogTitle {
+  background-color: #1976d2;
+  color: white;
+  padding: 16px 24px;
+}
+
+.closeButton {
+  position: absolute !important;
+  right: 8px;
+  top: 8px;
+  color: white !important;
+}
+
+.dialogContent {
+  padding: 24px;
+  background-color: #f5faff;
+}
+
+.settingsSection {
+  margin-bottom: 24px;
+}
+
+.sectionTitle {
+  color: #0d47a1;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.settingsOption {
+  margin-left: 0;
+  margin-bottom: 8px;
+}
+
+.clearStorageButton {
+  margin-top: 10px;
+}

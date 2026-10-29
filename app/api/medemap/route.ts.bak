@@ -1,0 +1,235 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { serverLogger } from '../../../lib/logging/serverLogger';
+import connectToDatabase from '../../../lib/server-reldb';
+import fs from 'fs';
+import path from 'path';
+import yaml from 'js-yaml';
+import { getProfileFiltersForRequest, filterTables, filterIndicators } from '../../../lib/profiles/filterHelper';
+
+// This route needs to be dynamic due to database queries and query parameters
+export const dynamic = 'force-dynamic';
+
+function getTargetSchema(req: NextRequest): string {
+  try {
+    // Use nextUrl instead of constructing new URL
+    const ds = req.nextUrl.searchParams.get('dataset');
+    if (ds === 'v1') return 'medemap_aug';
+    return 'medemap_aug_v2';
+  } catch {
+    return 'medemap_aug_v2';
+  }
+}
+
+function getColumnQuery(schema: string): string {
+  return `
+  SELECT column_name
+  FROM information_schema.columns
+  WHERE table_schema = '${schema}'
+  AND table_name = $1
+  ORDER BY ordinal_position
+`;
+}
+
+async function discoverTablesInOrder(db: any, schema: string): Promise<string[]> {
+  // Load order from config.yaml if available
+  let order: string[] = [];
+  try {
+    const configPath = path.join(process.cwd(), 'app', 'config.yaml');
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const cfg: any = yaml.load(raw);
+    order = Array.isArray(cfg?.tables?.order) ? cfg.tables.order : [];
+  } catch (e) {
+    // ignore if config cannot be read
+  }
+
+  // Fetch tables that actually exist in schema
+  const { rows } = await db.query(
+    `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`,
+    [schema]
+  );
+  const existing = new Set((rows as any[]).map((r: any) => r.table_name as string));
+
+  // Exclude non-indicator tables
+  const blacklist = new Set(['application_logs', 'geocoordinates', 'basic_data']);
+
+  // Preferred order from config; fallback to alphabetical of remaining
+  const ordered = order.filter(t => existing.has(t) && !blacklist.has(t));
+  const remaining = Array.from(existing)
+    .filter(t => !ordered.includes(t) && !blacklist.has(t))
+    .sort();
+  return [...ordered, ...remaining];
+}
+
+function getTableGroupMap(): { [tableName: string]: string } {
+  // In MeDeMAP, table names ARE the group identifiers
+  // e.g., "democracy" table belongs to "democracy" group
+  try {
+    const configPath = path.join(process.cwd(), 'app', 'config.yaml');
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const cfg: any = yaml.load(raw);
+    const order = Array.isArray(cfg?.tables?.order) ? cfg.tables.order : [];
+
+    // Simple mapping: table name -> itself as group
+    const map: { [key: string]: string } = {};
+    for (const tableName of order) {
+      map[tableName] = tableName;
+    }
+    return map;
+  } catch (e) {
+    serverLogger.warning('Could not load table group mapping:', e);
+    return {};
+  }
+}
+
+export async function GET(req: NextRequest) {
+  serverLogger.info('GET request received for /api/medemap');
+  try {
+    const schema = getTargetSchema(req);
+    const columnQuery = getColumnQuery(schema);
+
+    // Get profile ID from query params
+    const profileId = req.nextUrl.searchParams.get('profile');
+    serverLogger.info('[Profile Filter] Profile ID:', profileId);
+
+    // Load profile filters (checks permissions automatically)
+    let filters = null;
+    try {
+      filters = await getProfileFiltersForRequest(profileId || undefined);
+      serverLogger.info('[Profile Filter] Filters loaded:', filters);
+    } catch (error: any) {
+      serverLogger.error('[Profile Filter] Error loading filters:', error.message);
+      // If user doesn't have access, return 403
+      if (error.message.includes('does not have access')) {
+        return NextResponse.json(
+          { error: error.message },
+          { status: 403 }
+        );
+      }
+      // Otherwise continue without filters (show all data)
+    }
+
+    const db = await connectToDatabase();
+    const responseData: { [key: string]: any } = {};
+    const columnData: { [key: string]: any[] } = {};
+
+    // Get all tables
+    const allTables = await discoverTablesInOrder(db, schema);
+    serverLogger.info('[Profile Filter] All tables:', allTables);
+
+    // Apply profile filtering
+    const tableGroupMap = getTableGroupMap();
+    const tables = filterTables(allTables, filters, tableGroupMap);
+    serverLogger.info('[Profile Filter] Filtered tables:', tables);
+
+    for (const table of tables) {
+      serverLogger.info(`Processing table: ${table} (schema: ${schema})`);
+      // Fetch column names
+      const { rows: columnNameRows }: { rows: any[] } = await db.query(columnQuery, [table]);
+      const columnNames = columnNameRows as any[];
+      serverLogger.info(`Column names for ${table}:`, columnNames);
+
+      // Fetch the meta data row
+      const { rows: metaRows }: { rows: any[] } = await db.query(`SELECT * FROM ${schema}.${table} WHERE country = 'metastat'`);
+      const metaRow = (metaRows as any[])[0] || {};
+      serverLogger.info(`Meta data row for ${table}:`, metaRow);
+
+      // Fetch table data excluding the meta data row
+      const { rows: dataRows }: { rows: any[] } = await db.query(`SELECT * FROM ${schema}.${table} WHERE country != 'metastat'`);
+      serverLogger.info(`Sample data fetched for ${table}:`, (dataRows as any[])[0]);
+      responseData[table] = [...(dataRows as any[])];
+
+      // Derive visible (non-null) indicators: retain only columns that have at least one non-null value
+      const nonMetaColumns: string[] = (columnNames as any[])
+        .filter((row: any) => !String(row.column_name).startsWith('meta_'))
+        .map((r: any) => String(r.column_name));
+      let visibleColumns: string[] = nonMetaColumns.filter(col => (dataRows as any[]).some((r: any) => r[col] !== null && r[col] !== undefined));
+
+      // Exclude specific indicators
+      const excludedIndicators = ['2024_RIGHT_INFORMATION_II'];
+      visibleColumns = visibleColumns.filter(col => !excludedIndicators.includes(col));
+
+      serverLogger.info(`[Profile Filter] Table ${table} - ALL ${visibleColumns.length} visible columns:`, visibleColumns);
+      serverLogger.info(`[Profile Filter] Table ${table} - Columns containing 'eiu' (lowercase):`, visibleColumns.filter(c => c.toLowerCase().includes('eiu')));
+      serverLogger.info(`[Profile Filter] Table ${table} - Columns containing '_EIU_' (uppercase):`, visibleColumns.filter(c => c.includes('_EIU_')));
+
+      // Apply profile indicator filtering
+      const beforeFilterCount = visibleColumns.length;
+      visibleColumns = filterIndicators(visibleColumns, filters);
+      serverLogger.info(`[Profile Filter] Filtered indicators for ${table}: ${beforeFilterCount} -> ${visibleColumns.length}`, visibleColumns);
+
+      columnData[table] = visibleColumns
+        .map(columnName => {
+          const metaColumnName = `meta_${columnName}`;
+          const metaDataRaw = metaRow ? metaRow[metaColumnName] : null;
+          let metaData = null;
+
+          if (metaDataRaw) {
+            try {
+              metaData = typeof metaDataRaw === 'string' ? JSON.parse(metaDataRaw) : metaDataRaw;
+            } catch (e) {
+              serverLogger.error(`Error parsing JSON for ${metaColumnName}:`, e);
+            }
+          }
+
+          // Extract verbose label when available
+          let verbose = (metaData && (metaData as any).indicator) ? String((metaData as any).indicator) : undefined;
+          // For v2 wide columns, append year part from the column name so users can pick specific years
+          if (schema === 'medemap_aug_v2') {
+            const yearMatch = columnName.match(/^(\d{4})/);
+            const yearTag = yearMatch ? yearMatch[1] : undefined;
+            if (verbose && yearTag) {
+              verbose = `${verbose} (${yearTag})`;
+            } else {
+              // Fallback formatting of header
+              const base = columnName.replace(/^(\d{4})([A-Za-z]?_)?/, '').replace(/_/g, ' ').trim();
+              verbose = yearTag ? `${base} (${yearTag})` : base;
+            }
+            if (metaData) {
+              (metaData as any).indicator = verbose;
+            }
+          } else if (!verbose) {
+            // Legacy fallback label formatting
+            verbose = columnName.replace(/_/g, ' ');
+          }
+
+          return {
+            value: columnName,
+            label: verbose as string,
+            meta: metaData || null,
+          };
+        });
+
+      serverLogger.info(`Processed column data for ${table}:`, columnData[table]);
+    }
+
+    // Add column data to the response
+    responseData.columnOptions = { ...columnData };
+
+    serverLogger.info('Response data prepared. Sending response.');
+    // Check if caching is disabled via query parameter
+    const disableCache = req.nextUrl.searchParams.get('nocache') === 'true';
+
+    const headers: Record<string, string> = {};
+
+    if (disableCache) {
+      headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+      headers['Pragma'] = 'no-cache';
+      headers['Expires'] = '0';
+      headers['ETag'] = `"${Date.now()}"`;
+    } else {
+      headers['Cache-Control'] = 'public, max-age=300'; // 5 minute cache
+    }
+
+    return NextResponse.json(responseData, { headers });
+  } catch (error) {
+    serverLogger.error('Error fetching data:', error);
+    return NextResponse.json({ error: 'Error fetching data', details: (error as any).message }, {
+      status: 500,
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  }
+}

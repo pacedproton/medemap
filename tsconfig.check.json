@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Enable strict mode incrementally
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": false, // Enable later - many classes need defaults
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+
+    // Additional checks we'll enable later
+    "noImplicitReturns": false, // Enable after fixing explicit returns
+    "noUncheckedIndexedAccess": false, // Enable after adding bounds checks
+    "exactOptionalPropertyTypes": false, // Enable after fixing optionality
+
+    // Error on common issues
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": false, // Enable later
+    "noUncheckedIndexedAccess": false, // Enable later
+    "noUnusedLocals": false, // Enable after cleanup
+    "noUnusedParameters": false, // Enable after cleanup
+
+    // Keep these from base config
+    "noEmit": true,
+    "skipLibCheck": true,
+    "incremental": true,
+    "jsx": "react-jsx"
+  },
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "node_modules",
+    ".next",
+    "build",
+    "dist"
+  ]
+}

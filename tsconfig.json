@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "@/components/*": [
+        "app/components/*"
+      ],
+      "@/lib/*": [
+        "lib/*"
+      ],
+      "@/api/*": [
+        "app/api/*"
+      ],
+      "@/styles/*": [
+        "app/styles/*"
+      ]
+    },
+    "target": "ESNext",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ESNext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": false, // Enable later - many classes need defaults
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "noImplicitReturns": false, // Enable after fixing explicit returns
+    "noUncheckedIndexedAccess": false, // Enable after adding bounds checks
+    "exactOptionalPropertyTypes": false, // Enable after fixing optionality
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": false, // Enable later
+    "noUnusedLocals": false, // Enable after cleanup
+    "noUnusedParameters": false, // Enable after cleanup
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      },
+      {
+        "name": "typescript-eslint-language-service"
+      }
+    ],
+    "types": [
+      "jest",
+      "node"
+    ]
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    "app/api/route.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

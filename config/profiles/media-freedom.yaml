@@ -1,0 +1,41 @@
+# Media Freedom & Pluralism Profile
+# Public profile focused on media landscape indicators
+
+profile:
+  id: media-freedom
+  name: "Media Freedom & Pluralism"
+  description: "Media landscape, freedom of press, and pluralism indicators"
+  icon: "newspaper"
+  color: "#ed6c02"
+  public: true  # Available to all authenticated users
+
+  groups:
+    - legal_framework_freedom
+    - legal_framework_pluralism
+    - supply_side
+
+  tables:
+    - basic_data
+
+  indicators: []
+
+  exclude:
+    tables: []
+    indicators: []
+
+  defaults:
+    view: "chart"
+    chartType: "line"
+    timeRange: "2015-2024"
+    countries: "european"
+
+  metadata:
+    author: "MeDeMAP Team"
+    created: "2024-01-20"
+    updated: "2024-03-10"
+    version: "1.0"
+    tags:
+      - media
+      - freedom
+      - pluralism
+      - journalism

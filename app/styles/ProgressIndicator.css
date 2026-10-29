@@ -1,0 +1,15 @@
+.progress-indicator {
+        height: 30px; 
+        display: flex;
+        justify-content: center;
+        width: 100%;
+      }
+      
+      .progress-indicator .MuiLinearProgress-colorPrimary {
+        background-color: #eeeeee;
+      }
+      
+      .progress-indicator .MuiLinearProgress-bar {
+        border-radius: 5px;
+        background-color: #1976d2; 
+      }

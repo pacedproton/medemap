@@ -1,0 +1,43 @@
+# Democracy & Participation - EIU Indicators Only
+# Shows only EIU (Economist Intelligence Unit) democracy indicators
+
+profile:
+  id: democracy-eiu-only
+  name: "Democracy & Participation (EIU Only)"
+  description: "Democracy indicators from EIU sources only"
+  icon: "how_to_vote"
+  color: "#1976d2"
+  public: false
+
+  # Don't include groups - be explicit about tables
+  groups: []
+
+  # Include democracy and basic_data tables
+  tables:
+    - democracy
+    - basic_data
+
+  # Only show indicators/columns containing "_eiu_" within the democracy table
+  # Matches year-prefixed columns like 2022_eiu_dem_index, 2023_eiu_electoral_process, etc.
+  indicators:
+    - "*_eiu_*"   # Matches all columns containing "_eiu_" (lowercase)
+
+  exclude:
+    tables: []
+    indicators: []
+
+  defaults:
+    view: "map"
+    chartType: "bar"
+    timeRange: "2020-2024"
+    countries: "european"
+
+  metadata:
+    author: "MeDeMAP Team"
+    created: "2024-03-10"
+    updated: "2024-03-10"
+    version: "1.0"
+    tags:
+      - democracy
+      - eiu
+      - economist-intelligence-unit

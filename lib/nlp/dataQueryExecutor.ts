@@ -1,0 +1,470 @@
+import { store } from '@/lib/store';
+import { logger } from '@/lib/logging/logger';
+import { setSelectedOptions, selectMedeMapData, setSelectedCountries } from '@/lib/features/medemap/medeMapSlice';
+
+interface FilterCriteria {
+  countries?: string[];
+  indicators?: string[];
+  timeRange?: { start?: number; end?: number };
+  analysis?: string;
+}
+
+interface QueryResult {
+  success: boolean;
+  data?: any;
+  filteredSelections?: any;
+  message: string;
+  stats?: {
+    totalCountries: number;
+    totalIndicators: number;
+    dataPoints: number;
+  };
+}
+
+export class DataQueryExecutor {
+
+  /**
+   * Execute a data query based on natural language filter criteria
+   */
+  static async executeQuery(criteria: FilterCriteria): Promise<QueryResult> {
+    try {
+      const state = store.getState();
+      const medeMapData = selectMedeMapData(state);
+
+      logger.info('DataQueryExecutor medeMapData', { component: 'dataQueryExecutor', medeMapData });
+      logger.info('DataQueryExecutor criteria', { component: 'dataQueryExecutor', criteria });
+
+      if (!medeMapData.data || Object.keys(medeMapData.data).length === 0) {
+        return {
+          success: false,
+          message: 'No data available. Please load data first.'
+        };
+      }
+
+      // Build filtered selections based on criteria
+      const filteredSelections = DataQueryExecutor.buildFilteredSelections(criteria, medeMapData);
+
+      // Apply the selections to Redux state
+      store.dispatch(setSelectedOptions(filteredSelections));
+
+      // If countries are specified, set them in Redux state
+      if (criteria.countries && criteria.countries.length > 0) {
+        const expandedCountries = DataQueryExecutor.expandCountries(criteria.countries);
+        store.dispatch(setSelectedCountries(expandedCountries));
+      }
+
+      // Get filtered data
+      const filteredData = DataQueryExecutor.getFilteredData(criteria, medeMapData);
+
+      // Calculate statistics
+      const stats = DataQueryExecutor.calculateStats(filteredData, filteredSelections);
+
+      return {
+        success: true,
+        data: filteredData,
+        filteredSelections,
+        message: DataQueryExecutor.generateSuccessMessage(criteria, stats),
+        stats
+      };
+    } catch (error) {
+      logger.error('Data query execution failed', { component: "dataQueryExecutor", error });
+      return {
+        success: false,
+        message: `Query failed: ${(error as Error).message}`
+      };
+    }
+  }
+
+  /**
+   * Build filtered selections based on criteria
+   */
+  private static buildFilteredSelections(criteria: FilterCriteria, medeMapData: any): any {
+    const selections: Record<string, any[]> = {};
+    const { columnOptions, data } = medeMapData;
+
+    logger.info('buildFilteredSelections: columnOptions keys:', Object.keys(columnOptions));
+    logger.info('buildFilteredSelections democracy columnOptions', { component: 'dataQueryExecutor', democracyColumnOptions: columnOptions['democracy'] });
+
+    // Process each table
+    Object.keys(columnOptions).forEach(tableName => {
+      const tableColumns = columnOptions[tableName] || [];
+      let selectedColumns = [];
+
+      // Filter by indicators if specified, or select defaults if only countries specified
+      if (criteria.indicators && criteria.indicators.length > 0) {
+        logger.info(`buildFilteredSelections: Processing table ${tableName} with criteria indicators`, { component: "dataQueryExecutor", indicators: criteria.indicators });
+        selectedColumns = tableColumns.filter((column: any) => {
+          const matches = criteria.indicators!.some(indicator => {
+            const indicatorLower = indicator.toLowerCase();
+            const columnValue = column.value?.toLowerCase() || '';
+            const columnLabel = column.label?.toLowerCase() || '';
+            const thresholdIndicator = column.thresholds?.indicator?.toLowerCase() || '';
+
+            const basicMatch = columnValue.includes(indicatorLower) ||
+                              columnLabel.includes(indicatorLower) ||
+                              thresholdIndicator.includes(indicatorLower);
+            const patternMatch = DataQueryExecutor.matchesIndicatorPattern(indicatorLower, column);
+
+            if (tableName === 'democracy' && (basicMatch || patternMatch)) {
+              logger.info(`buildFilteredSelections: Democracy match found for indicator "${indicator}" in column`, { component: "dataQueryExecutor", column });
+            }
+
+            return basicMatch || patternMatch;
+          });
+          return matches;
+        });
+      } else if (criteria.countries && criteria.countries.length > 0 && !criteria.indicators) {
+        // If only countries specified (no indicators), select first few meaningful columns as defaults
+        selectedColumns = tableColumns
+          .filter((col: any) => !['year', 'country'].includes(col.value))
+          .slice(0, 3); // Select first 3 indicators from each table
+      } else {
+        // If no specific indicators or countries, select all
+        selectedColumns = tableColumns;
+      }
+
+      // Filter by time range if specified
+      if (criteria.timeRange) {
+        selectedColumns = selectedColumns.filter((column: any) => {
+          const year = DataQueryExecutor.extractYear(column.value);
+          if (year) {
+            const inRange = (!criteria.timeRange!.start || year >= criteria.timeRange!.start) &&
+                           (!criteria.timeRange!.end || year <= criteria.timeRange!.end);
+            return inRange;
+          }
+          return true; // Include if no year found
+        });
+      }
+
+      if (selectedColumns.length > 0) {
+        selections[tableName] = selectedColumns;
+        logger.info(`buildFilteredSelections: Added ${selectedColumns.length} columns for table ${tableName}`, { component: "dataQueryExecutor" });
+      } else {
+        logger.info(`buildFilteredSelections: No columns selected for table ${tableName}`, { component: "dataQueryExecutor" });
+      }
+    });
+
+    return selections;
+  }
+
+  /**
+   * Expand country groups into individual countries
+   */
+  private static expandCountries(countries: string[]): string[] {
+    const countryGroups: Record<string, string[]> = {
+      'nordic': ['sweden', 'denmark', 'norway', 'finland', 'iceland'],
+      'scandinavian': ['sweden', 'denmark', 'norway'],
+      'baltic': ['estonia', 'latvia', 'lithuania'],
+      'western europe': ['germany', 'france', 'netherlands', 'belgium', 'luxembourg', 'austria'],
+      'eastern europe': ['poland', 'czech republic', 'slovakia', 'hungary', 'romania', 'bulgaria'],
+      'southern europe': ['italy', 'spain', 'portugal', 'greece', 'malta', 'cyprus'],
+      'benelux': ['belgium', 'netherlands', 'luxembourg'],
+      'visegrad': ['poland', 'czech republic', 'slovakia', 'hungary']
+    };
+
+    const expanded: string[] = [];
+    countries.forEach(country => {
+      const countryLower = country.toLowerCase();
+      if (countryGroups[countryLower]) {
+        expanded.push(...countryGroups[countryLower]);
+      } else {
+        expanded.push(countryLower);
+      }
+    });
+
+    return [...new Set(expanded)]; // Remove duplicates
+  }
+
+  /**
+   * Get filtered data based on criteria
+   */
+  private static getFilteredData(criteria: FilterCriteria, medeMapData: any): any {
+    const filteredData: Record<string, any[]> = {};
+    const { data } = medeMapData;
+
+    logger.info('DataQueryExecutor getFilteredData: data keys:', Object.keys(data));
+
+    // Filter out non-table keys (columnOptions, columnOrder, etc.)
+    const tableNames = Object.keys(data).filter(key =>
+      !['columnOptions', 'columnOrder'].includes(key) &&
+      Array.isArray(data[key])
+    );
+
+    logger.info('DataQueryExecutor getFilteredData actual table names', { component: 'dataQueryExecutor', tableNames });
+
+    tableNames.forEach(tableName => {
+      let tableData = data[tableName] || [];
+      logger.info(`DataQueryExecutor: Processing table ${tableName}`, { component: "dataQueryExecutor" });
+      logger.info(`DataQueryExecutor: tableData type`, { component: "dataQueryExecutor", tableDataType: typeof tableData });
+      logger.info(`DataQueryExecutor: tableData isArray`, { component: "dataQueryExecutor", isArray: Array.isArray(tableData) });
+      logger.info(`DataQueryExecutor tableData sample`, { component: "dataQueryExecutor", tableData });
+
+      // Ensure tableData is an array
+      if (!Array.isArray(tableData)) {
+        logger.error('Table data is not an array', { component: "dataQueryExecutor", tableName, tableData });
+        filteredData[tableName] = [];
+        return;
+      }
+
+      // Filter by countries if specified
+      if (criteria.countries && criteria.countries.length > 0) {
+        try {
+          // Expand country groups first
+          const expandedCountries = DataQueryExecutor.expandCountries(criteria.countries);
+          logger.info('Expanded countries', { component: "dataQueryExecutor", expandedCountries });
+          logger.info('About to filter data', { component: "dataQueryExecutor", tableDataType: typeof tableData, isArray: Array.isArray(tableData) });
+
+          tableData = tableData.filter(row => {
+            const countryName = row.country?.toLowerCase() || '';
+            return expandedCountries.some(searchCountry => {
+              return countryName === searchCountry ||
+                     countryName.includes(searchCountry);
+            });
+          });
+          logger.info('DataQueryExecutor filter completed successfully', { component: 'dataQueryExecutor' });
+        } catch (error) {
+          logger.error('Error during country filtering', { component: 'dataQueryExecutor', error });
+          logger.error('Table data at time of country filtering error', { component: "dataQueryExecutor", tableData });
+          throw error;
+        }
+      }
+
+      // Apply analysis-specific filtering
+      if (criteria.analysis === 'trend' || criteria.analysis === 'declining') {
+        try {
+          logger.info('About to apply trend filtering', { component: "dataQueryExecutor", tableDataType: typeof tableData, isArray: Array.isArray(tableData) });
+          // For trend analysis, ensure we have time series data
+          tableData = DataQueryExecutor.filterForTrendAnalysis(tableData, criteria);
+          logger.info('DataQueryExecutor trend filtering completed successfully', { component: 'dataQueryExecutor' });
+        } catch (error) {
+          logger.error('Error during trend filtering', { component: 'dataQueryExecutor', error });
+          logger.error('Table data at time of trend filtering error', { component: "dataQueryExecutor", tableData });
+          throw error;
+        }
+      }
+
+      filteredData[tableName] = tableData;
+    });
+
+    return filteredData;
+  }
+
+  /**
+   * Filter data for trend analysis
+   */
+  private static filterForTrendAnalysis(data: any[], criteria: FilterCriteria): any[] {
+    logger.info('Filter for trend analysis input', { component: "dataQueryExecutor", dataType: typeof data, isArray: Array.isArray(data) });
+    logger.info('Filter for trend analysis data length', { component: "dataQueryExecutor", dataLength: data?.length });
+
+    if (!Array.isArray(data)) {
+      logger.error('Filter for trend analysis: data is not an array', { component: "dataQueryExecutor", data });
+      return [];
+    }
+
+    // For trend analysis, we need to identify declining/increasing patterns
+    // This is simplified - in reality you'd calculate actual trends
+    return data.filter(row => {
+      // Check if we have numeric values to analyze
+      const numericValues = Object.keys(row)
+        .filter(key => !isNaN(parseFloat(row[key])))
+        .map(key => parseFloat(row[key]));
+
+      if (numericValues.length < 2) return false;
+
+      if (criteria.analysis === 'declining') {
+        // Simple check: is the last value lower than the first?
+        return numericValues[numericValues.length - 1] < numericValues[0];
+      }
+
+      return true;
+    });
+  }
+
+  /**
+   * Match indicator patterns
+   */
+  private static matchesIndicatorPattern(searchTerm: string, column: any): boolean {
+    const patterns = {
+      'press freedom': ['press', 'freedom', 'media_freedom', 'journalism'],
+      'democracy': ['democra', 'democratic', 'political'],
+      'trust': ['trust', 'confidence', 'credibility'],
+      'media use': ['media_use', 'consumption', 'usage'],
+      'corruption': ['corrupt', 'transparency', 'integrity'],
+      'pluralism': ['plural', 'diversity', 'variety']
+    };
+
+    for (const [key, keywords] of Object.entries(patterns)) {
+      if (searchTerm.includes(key.replace(' ', '_')) || key.includes(searchTerm)) {
+        return keywords.some(keyword =>
+          column.value?.toLowerCase().includes(keyword) ||
+          column.label?.toLowerCase().includes(keyword)
+        );
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Match country patterns (handles variations)
+   */
+  private static matchesCountryPattern(searchTerm: string, countryName: string): boolean {
+    const countryGroups: Record<string, string[]> = {
+      'nordic': ['sweden', 'denmark', 'norway', 'finland', 'iceland'],
+      'scandinavian': ['sweden', 'denmark', 'norway'],
+      'baltic': ['estonia', 'latvia', 'lithuania'],
+      'western europe': ['germany', 'france', 'netherlands', 'belgium', 'luxembourg', 'austria'],
+      'eastern europe': ['poland', 'czech republic', 'slovakia', 'hungary', 'romania', 'bulgaria'],
+      'southern europe': ['italy', 'spain', 'portugal', 'greece', 'malta', 'cyprus'],
+      'benelux': ['belgium', 'netherlands', 'luxembourg'],
+      'visegrad': ['poland', 'czech republic', 'slovakia', 'hungary']
+    };
+
+    // Check if search term is a group name
+    const group = countryGroups[searchTerm];
+    if (group) {
+      return group.some((country: string) => countryName.includes(country));
+    }
+
+    // Check alternative names
+    const alternativeNames: Record<string, string> = {
+      'czechia': 'czech republic',
+      'holland': 'netherlands',
+      'slovak republic': 'slovakia'
+    };
+
+    const alternative = alternativeNames[searchTerm];
+    if (alternative) {
+      return countryName.includes(alternative);
+    }
+
+    return false;
+  }
+
+  /**
+   * Extract year from column name
+   */
+  private static extractYear(columnName: string): number | null {
+    const yearMatch = columnName?.match(/\b(19|20)\d{2}\b/);
+    return yearMatch ? parseInt(yearMatch[0]) : null;
+  }
+
+  /**
+   * Calculate statistics for the filtered data
+   */
+  private static calculateStats(filteredData: any, selections: any): any {
+    let totalCountries = 0;
+    let totalIndicators = 0;
+    let dataPoints = 0;
+
+    // Count unique countries
+    const uniqueCountries = new Set();
+    Object.values(filteredData).forEach((tableData: any) => {
+      tableData.forEach((row: any) => {
+        if (row.country) uniqueCountries.add(row.country);
+      });
+    });
+    totalCountries = uniqueCountries.size;
+
+    // Count selected indicators
+    Object.values(selections).forEach((columns: any) => {
+      totalIndicators += columns.length;
+    });
+
+    // Count data points
+    Object.values(filteredData).forEach((tableData: any) => {
+      dataPoints += tableData.length;
+    });
+
+    return {
+      totalCountries,
+      totalIndicators,
+      dataPoints
+    };
+  }
+
+  /**
+   * Generate success message based on criteria and results
+   */
+  private static generateSuccessMessage(criteria: FilterCriteria, stats: any): string {
+    const parts = [];
+
+    if (criteria.countries && criteria.countries.length > 0) {
+      parts.push(`Filtered to ${criteria.countries.join(', ')}`);
+    }
+
+    if (criteria.indicators && criteria.indicators.length > 0) {
+      parts.push(`showing ${criteria.indicators.join(', ')} indicators`);
+    }
+
+    if (criteria.timeRange) {
+      parts.push(`for years ${criteria.timeRange.start || 'earliest'} to ${criteria.timeRange.end || 'latest'}`);
+    }
+
+    parts.push(`(${stats.totalCountries} countries, ${stats.totalIndicators} indicators, ${stats.dataPoints} data points)`);
+
+    return parts.join(', ');
+  }
+
+  /**
+   * Analyze trends in the data
+   */
+  static analyzeTrends(data: any, indicators: string[]): any {
+    const trends: Record<string, any> = {};
+
+    Object.keys(data).forEach(tableName => {
+      const tableData = data[tableName];
+      if (!tableData || tableData.length === 0) return;
+
+      indicators.forEach(indicator => {
+        const trend = DataQueryExecutor.calculateTrend(tableData, indicator);
+        if (trend) {
+          trends[`${tableName}_${indicator}`] = trend;
+        }
+      });
+    });
+
+    return trends;
+  }
+
+  /**
+   * Calculate trend for a specific indicator
+   */
+  private static calculateTrend(data: any[], indicator: string): any {
+    // Extract time series for the indicator
+    const timeSeries: Array<{ year: number; value: number; country: string }> = [];
+
+    data.forEach(row => {
+      Object.keys(row).forEach(key => {
+        if (key.toLowerCase().includes(indicator.toLowerCase())) {
+          const year = DataQueryExecutor.extractYear(key);
+          const value = parseFloat(row[key]);
+
+          if (year && !isNaN(value)) {
+            timeSeries.push({ year, value, country: row.country });
+          }
+        }
+      });
+    });
+
+    if (timeSeries.length < 2) return null;
+
+    // Sort by year
+    timeSeries.sort((a, b) => a.year - b.year);
+
+    // Calculate simple trend (positive/negative/stable)
+    const firstValue = timeSeries[0].value;
+    const lastValue = timeSeries[timeSeries.length - 1].value;
+    const change = lastValue - firstValue;
+    const percentChange = (change / firstValue) * 100;
+
+    return {
+      direction: change > 0.05 ? 'increasing' : change < -0.05 ? 'declining' : 'stable',
+      change,
+      percentChange,
+      startYear: timeSeries[0].year,
+      endYear: timeSeries[timeSeries.length - 1].year,
+      dataPoints: timeSeries.length
+    };
+  }
+}

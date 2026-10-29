@@ -1,0 +1,1367 @@
+"use client";
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { logger } from '../../lib/logging/logger';
+import {
+  Box,
+  TextField,
+  Paper,
+  IconButton,
+  CircularProgress,
+  Typography,
+  Chip,
+  Fade,
+  Alert,
+  Tooltip,
+  List,
+  ListItem,
+  ListItemText,
+  Divider,
+  Fab
+} from '@mui/material';
+import {
+  Search as SearchIcon,
+  Mic as MicIcon,
+  Send as SendIcon,
+  History as HistoryIcon,
+  Close as CloseIcon,
+  Psychology as PsychologyIcon,
+  SmartToy as SmartToyIcon,
+  DragHandle as DragHandleIcon,
+  Refresh as RefreshIcon
+} from '@mui/icons-material';
+import { useDispatch, useSelector } from 'react-redux';
+import { useRouter, usePathname } from 'next/navigation';
+import { selectMedeMapData } from '../../lib/features/medemap/medeMapSlice';
+import { selectLabelDisplayMode } from '../../lib/features/settings/labelDisplaySlice';
+import { ViewContext } from '../../lib/services/ollamaService';
+import { llmService } from '../../lib/services/llm/LLMService';
+import { LLMConfigManager } from '../../lib/services/llm/LLMConfigManager';
+import { singleProviderManager } from '../../lib/services/llm/SingleProviderManager';
+import { useAIAPI } from '../../lib/api/ai-api-implementation';
+import { useTranslation } from 'react-i18next';
+
+interface QueryHistoryItem {
+  query: string;
+  timestamp: Date;
+  success: boolean;
+  response?: string;
+}
+
+const NaturalLanguageInterface: React.FC = () => {
+  const { t } = useTranslation();
+  const dispatch = useDispatch();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // State
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [response, setResponse] = useState<string>('');
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [llmConnected, setLlmConnected] = useState(false);
+  const [currentProvider, setCurrentProvider] = useState<string>('none');
+  const [currentModel, setCurrentModel] = useState<string>('none');
+  const [taskList, setTaskList] = useState<Array<{
+    name: string;
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    message?: string;
+  }>>([]);
+
+  // Context caching state
+  const [cachedSystemPrompt, setCachedSystemPrompt] = useState<string>('');
+  const [lastDataHash, setLastDataHash] = useState<string>('');
+  const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
+
+  // Position and size state for draggable/resizable functionality
+  const [position, setPosition] = useState({ x: 20, y: 20 }); // bottom-right positioning
+  const [size, setSize] = useState({ width: 480, height: 600 }); // Will be updated in useEffect
+  const [isDragging, setIsDragging] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0, startX: 0, startY: 0 });
+
+  // Refs
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Drag and resize handlers
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+    setDragStart({
+      x: e.clientX,
+      y: e.clientY,
+      startX: position.x,
+      startY: position.y
+    });
+  }, [position]);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (isDragging) {
+      const deltaX = e.clientX - dragStart.x;
+      const deltaY = e.clientY - dragStart.y;
+
+      // Calculate new position (note: we're using bottom/right positioning)
+      const newX = Math.max(10, Math.min(window.innerWidth - size.width - 10, dragStart.startX - deltaX));
+      const newY = Math.max(10, Math.min(window.innerHeight - size.height - 10, dragStart.startY - deltaY));
+
+      setPosition({ x: newX, y: newY });
+    }
+  }, [isDragging, dragStart, size]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+    setIsResizing(false);
+  }, []);
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsResizing(true);
+    setDragStart({
+      x: e.clientX,
+      y: e.clientY,
+      startX: size.width,
+      startY: size.height
+    });
+  }, [size]);
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (isResizing) {
+      const deltaX = e.clientX - dragStart.x;
+      const deltaY = e.clientY - dragStart.y;
+
+      const newWidth = Math.max(300, Math.min(800, dragStart.startX + deltaX));
+      const newHeight = Math.max(400, Math.min(800, dragStart.startY + deltaY));
+
+      setSize({ width: newWidth, height: newHeight });
+    }
+  }, [isResizing, dragStart]);
+
+  // Mouse event listeners
+  useEffect(() => {
+    if (isDragging || isResizing) {
+      const moveHandler = isDragging ? handleMouseMove : handleResizeMove;
+      document.addEventListener('mousemove', moveHandler);
+      document.addEventListener('mouseup', handleMouseUp);
+
+      return () => {
+        document.removeEventListener('mousemove', moveHandler);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isDragging, isResizing, handleMouseMove, handleResizeMove, handleMouseUp]);
+
+  // Hooks
+  const aiAPI = useAIAPI();
+
+  // Redux selectors
+  const medeMapState = useSelector(selectMedeMapData);
+  const labelDisplayMode = useSelector(selectLabelDisplayMode);
+
+  // Initialize LLM service on mount
+  useEffect(() => {
+    initializeLLMService();
+  }, []);
+
+  // Set optimal window size after mount (1/4 screen width)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const updateSize = () => {
+        setSize({
+          width: Math.max(480, window.innerWidth * 0.25), // 1/4 screen width, minimum 480px
+          height: Math.max(600, window.innerHeight * 0.6)  // 60% screen height, minimum 600px
+        });
+      };
+
+      // Set initial size
+      updateSize();
+
+      // Update size on window resize
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
+    }
+  }, []);
+
+  // Load query history from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('nlQueryHistory');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setQueryHistory(parsed.map((item: any) => ({
+          ...item,
+          timestamp: new Date(item.timestamp)
+        })));
+      } catch (e) {
+        logger.warning('Failed to load query history:', e);
+      }
+    }
+  }, []);
+
+  // Auto-focus input when opened
+  useEffect(() => {
+    if (isOpen && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [isOpen]);
+
+  const initializeLLMService = async () => {
+    try {
+      // Check server-side LLM connectivity status
+      const response = await fetch('/api/llm', {
+        method: 'GET'
+      });
+
+      if (response.ok) {
+        const status = await response.json();
+        logger.info('Server LLM status:', status);
+
+        // Update connection status based on server response
+        if (status.primary) {
+          setLlmConnected(status.primary.connected || false);
+          setCurrentProvider(status.primary.provider || 'none');
+          setCurrentModel(status.primary.model || 'none');
+
+          logger.info('LLM Service initialized via server:', {
+            provider: status.primary.provider,
+            connected: status.primary.connected,
+            model: status.primary.model
+          });
+        } else {
+          setLlmConnected(false);
+          setCurrentProvider('none');
+          setCurrentModel('none');
+        }
+      } else {
+        logger.error('Failed to check server LLM status:', response.statusText);
+        setLlmConnected(false);
+        setCurrentProvider('none');
+        setCurrentModel('none');
+      }
+    } catch (error) {
+      logger.error('Failed to initialize LLM service:', error);
+      setLlmConnected(false);
+      setCurrentProvider('none');
+      setCurrentModel('none');
+    }
+  };
+
+  // Initialize LLM service on component mount
+  useEffect(() => {
+    initializeLLMService();
+  }, []);
+
+  // Helper function to create a hash of the current data state
+  const createDataHash = (state: any, path: string): string => {
+    const relevantData = {
+      pathname: path,
+      hasData: !!state?.data,
+      columnCount: Object.keys(state?.columnOptions || {}).length,
+      dataTimestamp: state?.lastUpdated || 'unknown'
+    };
+    return btoa(JSON.stringify(relevantData));
+  };
+
+  // Context caching - rebuild system prompt only when data changes
+  useEffect(() => {
+    const currentHash = createDataHash(medeMapState, pathname);
+    if (currentHash !== lastDataHash || !cachedSystemPrompt) {
+      logger.info('🔄 Rebuilding cached system prompt due to data change');
+      const context = getViewContext();
+      setCachedSystemPrompt(buildSystemPrompt(context));
+      setLastDataHash(currentHash);
+    }
+  }, [medeMapState, pathname, lastDataHash, cachedSystemPrompt, labelDisplayMode]);
+
+  // Helper functions for LLM processing
+  const buildSystemPrompt = (context: ViewContext): string => {
+    return `You are an AI research assistant for MeDeMAP (Media Democracy Mapping), a sophisticated academic platform for analyzing media-democracy relationships across EU countries. You help researchers conduct scholarly analysis of press freedom, media pluralism, and democratic governance.
+
+RESEARCH CONTEXT:
+MeDeMAP serves media scholars, democracy researchers, and policy analysts studying how media landscapes affect democratic institutions. Your role is to help users conduct rigorous academic analysis using advanced statistical methods and data visualization.
+
+AVAILABLE RESEARCH METHODOLOGIES:
+- Data Envelopment Analysis (DEA) for efficiency analysis
+- Correlation analysis for relationship studies
+- Comparative analysis across EU regions
+- Time-series trend analysis
+- Geographic pattern mapping
+
+MEDEMAP RESEARCH DATABASE:
+27 EU countries with 100+ indicators across multiple domains:
+
+**DEMOCRACY & GOVERNANCE:**
+- Economist Democracy Index (Overall Score, Electoral Process, Functioning of Government, Political Participation, Political Culture, Civil Liberties)
+- V-Dem Democracy Indices (Electoral, Liberal, Participatory, Deliberative, Egalitarian Democracy)
+- Quality of Democracy Index
+- Civil Society Index
+- Civic Participation metrics
+- Voter Turnout data
+
+**MEDIA & PRESS:**
+- Press Freedom scores
+- Media concentration levels
+- Government control over media
+- Trust in media/press
+- Media diversity measures
+- Journalistic independence indicators
+
+**PARTICIPATION & DIGITAL:**
+- Online political participation rates
+- Internet use for civic engagement
+- Social media political expression
+- Digital democracy indicators
+
+**TRUST & INSTITUTIONS:**
+- Public trust in institutions
+- Trust in government
+- Trust in media
+- Institutional confidence measures
+
+**ECONOMIC & CORRUPTION:**
+- Corruption perception indices
+- Government spending efficiency
+- Economic freedom indicators
+
+Available views: choropleth, charts, dea, table, 3d
+Current view: ${context.currentPath}
+
+**ACTUAL AVAILABLE COLUMNS:**
+${Object.entries(context.availableData.columns || {})
+  .map(([tableName, columns]: [string, any[]]) =>
+    `${tableName.toUpperCase()}: ${columns.slice(0, 10).map((col: any) => col.value).join(', ')}${columns.length > 10 ? '...' : ''}`
+  ).join('\n')}
+
+**AVAILABLE COUNTRIES:**
+${context.availableData.countries.slice(0, 20).join(', ')}${context.availableData.countries.length > 20 ? '...' : ''}
+
+Key functions:
+- selectCountries({countries: string[]}): Select countries FIRST - ALWAYS use this for country comparisons
+- navigateToView({view: string}): Navigate to view
+- getColumns({table: string}): Get available indicators from a specific table
+- configureDeaAnalysis({inputs: string[], outputs: string[]}): Configure DEA with variables ONLY after user chooses
+- runDeaAnalysis(): Run DEA analysis LAST
+
+CRITICAL DEA WORKFLOW FOR "Compare 3 largest vs 3 smallest EU countries":
+1. FIRST: selectCountries({countries: ["Germany", "France", "Italy", "Malta", "Luxembourg", "Cyprus"]})
+2. THEN: navigateToView({view: "dea"})
+3. THEN: Ask user to choose inputs and outputs from the ACTUAL available columns listed above. Do NOT make up variable names! ONLY suggest variables that exist in the available columns data.
+
+4. WAIT for user variable selection, then: configureDeaAnalysis()
+5. FINALLY: runDeaAnalysis()
+
+MANDATORY: For country comparisons, ALWAYS use selectCountries() FIRST to choose the specific countries being analyzed.
+
+Respond with JSON containing ALL needed function calls:
+{
+  "functionCalls": [{"function": "name", "parameters": {}}],
+  "explanation": "description",
+  "confidence": 0.9,
+  "suggestedFollowUps": ["suggestions"]
+}
+
+RESEARCH SUPPORT GUIDELINES:
+- Help frame specific, answerable research questions
+- Suggest theoretically grounded variable combinations for DEA
+- Recommend appropriate analytical methods based on research goals
+- Provide academic context for statistical results
+- Support comparative analysis across EU regions or country groups
+
+⚠️ CRITICAL: NEVER invent or hallucinate variable names. ONLY use the exact column names from "ACTUAL AVAILABLE COLUMNS" above.
+
+For comprehensive project context, see: /docs/PROJECT_CONTEXT_FOR_GPT5.md
+
+Execute ALL required steps. Respond only with valid JSON:`;
+  };
+
+  const extractFunctionCalls = (response: string): any[] => {
+    try {
+      // Try to extract JSON from response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return [];
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      if (parsed.functionCalls && Array.isArray(parsed.functionCalls)) {
+        return parsed.functionCalls;
+      }
+
+      // Handle single function call
+      if (parsed.function && parsed.parameters) {
+        return [{
+          function: parsed.function,
+          parameters: parsed.parameters
+        }];
+      }
+
+      return [];
+    } catch (error) {
+      logger.warning('Failed to extract function calls:', error);
+      return [];
+    }
+  };
+
+  const extractExplanation = (response: string): string | null => {
+    try {
+      // Try to extract JSON from response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return null;
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Return just the explanation field
+      return parsed.explanation || null;
+    } catch (error) {
+      logger.warning('Failed to extract explanation:', error);
+      return null;
+    }
+  };
+
+  const generateSuggestions = (query: string, context: ViewContext): string[] => {
+    // Generate contextual suggestions based on current state
+    const suggestions = [];
+
+    if (context.currentPath.includes('dea')) {
+      suggestions.push(
+        'Choose INPUTS like government control, media concentration, or corruption',
+        'Choose OUTPUTS like press freedom, democracy scores, or public trust',
+        'Let me analyze the available data and suggest optimal variable combinations'
+      );
+    } else if (context.currentPath.includes('choropleth')) {
+      suggestions.push(
+        'Change color scheme',
+        'Filter by region',
+        'Switch to 3D view'
+      );
+    } else {
+      suggestions.push(
+        'Show me the choropleth map',
+        'Compare Nordic countries',
+        'Analyze press freedom trends'
+      );
+    }
+
+    return suggestions.slice(0, 3);
+  };
+
+  const getViewContext = (): ViewContext => {
+    return {
+      currentPath: pathname,
+      selectedCountries: [], // TODO: Extract from current selections
+      selectedIndicators: [], // TODO: Extract from current selections
+      availableData: {
+        tables: Object.keys((medeMapState as any)?.data || {}),
+        columns: (medeMapState as any)?.columnOptions || {},
+        countries: Object.values((medeMapState as any)?.data || {}).flat()
+          .map((row: any) => row?.country)
+          .filter((country, index, arr) => country && arr.indexOf(country) === index)
+      },
+      labelDisplayMode
+    };
+  };
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!query.trim() || isLoading) return;
+
+    setIsLoading(true);
+    setResponse('');
+    setTaskList([]); // Clear previous task list
+
+    try {
+      // Use cached system prompt for efficiency - only inject full context at start of conversation
+      const isNewConversation = conversationHistory.length === 0;
+      const messages = isNewConversation
+        ? [
+            { role: 'system', content: cachedSystemPrompt },
+            { role: 'user', content: query }
+          ]
+        : [
+            ...conversationHistory,
+            { role: 'user', content: query }
+          ];
+
+      logger.info(`📝 ${isNewConversation ? 'New conversation - injecting full context' : 'Continuing conversation - using cached context'} (${messages.length} messages)`);
+
+      if (isNewConversation) {
+        logger.info(`📊 System prompt size: ${cachedSystemPrompt.length} characters`);
+      }
+
+      let llmData;
+      let finalProvider = currentProvider;
+
+      // ⭐ CRITICAL FIX: Use single provider manager to ensure ONLY selected model is used
+      logger.info(`🎯 Using ONLY selected provider: ${currentProvider} (no fallbacks)`);
+
+      // Validate single provider mode
+      if (!singleProviderManager.validateSingleProvider()) {
+        logger.warning('⚠️  Multiple providers detected - forcing single provider mode');
+      }
+
+      const llmResponse = await fetch('/api/llm', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          provider: currentProvider,
+          messages,
+          temperature: 0.1,
+          maxTokens: 4000,
+          disableFallback: true,  // ⭐ CRITICAL: Disable all fallback logic
+          exclusiveMode: true     // ⭐ NEW: Ensure exclusive provider use
+        })
+      });
+
+      if (!llmResponse.ok) {
+        const errorData = await llmResponse.json();
+        logger.error(`❌ Selected provider ${currentProvider} failed:`, errorData);
+        throw new Error(`${currentProvider} failed: ${errorData.error || 'Unknown error'} - No fallback used as requested`);
+      }
+
+      llmData = await llmResponse.json();
+
+      // ⭐ Validate that the response came from the expected provider
+      if (llmData.provider && llmData.provider !== currentProvider) {
+        logger.error(`🚨 PROVIDER MISMATCH: Expected ${currentProvider}, got ${llmData.provider}`);
+        throw new Error(`Provider mismatch: Expected ${currentProvider}, but ${llmData.provider} responded`);
+      }
+
+      logger.info(`✅ SUCCESS: Response from selected provider ${currentProvider}`);
+      logger.info(`🧠 Model: ${llmData.model || 'unknown'}`);
+      logger.info(`📊 Provider confirmed: ${llmData.provider || currentProvider}`);
+      logger.info(`📝 Content length: ${llmData.content?.length || 0} chars`);
+
+      // Extract function calls and explanation from the response
+      const functionCalls = extractFunctionCalls(llmData.content);
+      const extractedExplanation = extractExplanation(llmData.content);
+
+      // Get current context for suggestions
+      const currentContext = getViewContext();
+
+      const nlResponse = {
+        functionCalls: functionCalls,
+        explanation: extractedExplanation || llmData.content,
+        confidence: 0.8,
+        suggestedFollowUps: generateSuggestions(query, currentContext),
+        provider: llmData.provider || finalProvider
+      };
+
+      // Execute AI API function calls
+      let allSuccessful = true;
+      let executionMessages: string[] = [];
+
+      logger.info('Executing function calls:', nlResponse.functionCalls);
+
+      // Create initial task list - single state update
+      const initialTasks = nlResponse.functionCalls.map(call => ({
+        name: getFriendlyTaskName(call),
+        status: 'pending' as const
+      }));
+      setTaskList(initialTasks);
+
+      // Execute multi-step workflows with full agentic capabilities
+      if (nlResponse.functionCalls.length > 1) {
+        logger.info(`Multi-step workflow detected - executing full agentic workflow`);
+
+        // Execute all operations with improved state management
+        for (let i = 0; i < nlResponse.functionCalls.length; i++) {
+          const functionCall = nlResponse.functionCalls[i];
+          logger.info(`🚀 Executing step ${i + 1}/${nlResponse.functionCalls.length}: ${functionCall.function}`);
+
+          try {
+            logger.info(`Executing step ${i + 1}/${nlResponse.functionCalls.length}: ${functionCall.function}`);
+
+            // Update task status to running
+            setTaskList(prev => prev.map((task, idx) =>
+              idx === i ? { ...task, status: 'running' } : task
+            ));
+
+            // Add delays between operations to prevent state conflicts
+            if (i > 0) {
+              await new Promise(resolve => setTimeout(resolve, 800)); // Delay between operations
+            }
+
+            let result;
+
+            // Execute all AI API operations
+            switch (functionCall.function) {
+              // Navigation methods
+              case 'navigateToView':
+                logger.info('🧭 Navigating to view:', functionCall.parameters.view);
+                result = await aiAPI.visualization.navigateTo(functionCall.parameters.view);
+
+                // Extra safeguard: If navigating to DEA, ensure it happens
+                if (functionCall.parameters.view === 'dea') {
+                  setTimeout(() => {
+                    if (!window.location.pathname.includes('dea')) {
+                      logger.info('🔄 DEA navigation may have failed, retrying with direct router...');
+                      router.push('/view_dea');
+                    }
+                  }, 1000);
+                }
+                break;
+
+              // Selection methods
+              case 'selectCountries':
+                logger.info('🎯 Selecting countries:', functionCall.parameters.countries);
+                result = await aiAPI.selection.setCountries(functionCall.parameters.countries || []);
+                break;
+              case 'selectIndicators':
+                logger.info('📊 Selecting indicators:', functionCall.parameters.indicators);
+                result = await aiAPI.selection.setIndicators(functionCall.parameters.indicators || []);
+                break;
+
+              // Discovery methods
+              case 'getTables':
+                logger.info('📋 Getting tables');
+                result = await aiAPI.discovery.getTables();
+                break;
+              case 'getColumns':
+                logger.info('📋 Getting columns:', functionCall.parameters);
+                result = await aiAPI.discovery.getColumns(functionCall.parameters);
+                break;
+              case 'searchData':
+                result = await aiAPI.discovery.searchData(functionCall.parameters);
+                break;
+
+              // Analysis methods
+              case 'compareCountries':
+                result = await aiAPI.analysis.compare(functionCall.parameters);
+                break;
+              case 'analyzeTrends':
+                result = await aiAPI.analysis.trends(functionCall.parameters);
+                break;
+
+              // View-specific methods
+              case 'configureDeaAnalysis':
+                logger.info('⚙️ Configuring DEA analysis:', functionCall.parameters);
+                result = await aiAPI.views.dea.configureAnalysis({
+                  inputs: functionCall.parameters.inputs || [],
+                  outputs: functionCall.parameters.outputs || [],
+                  modelType: functionCall.parameters.modelType || 'CCR',
+                  orientation: functionCall.parameters.orientation || 'input',
+                  countries: functionCall.parameters.countries
+                });
+                break;
+              case 'runDeaAnalysis':
+                logger.info('🔬 Running DEA analysis');
+                result = await aiAPI.views.dea.runAnalysis();
+                break;
+              case 'configureChoropleth':
+                result = await aiAPI.views.choropleth.configure(functionCall.parameters);
+                break;
+              case 'configureCharts':
+                result = await aiAPI.views.charts.configure(functionCall.parameters);
+                break;
+
+              // Settings methods
+              case 'setLabelFormat':
+                result = { success: false, message: 'setLabelFormat not implemented in AI API yet' };
+                break;
+
+              default:
+                logger.warning(`Unknown function in multi-step: ${functionCall.function}`);
+                result = { success: false, message: `Unknown function: ${functionCall.function}` };
+            }
+
+            logger.info(`Step ${i + 1} result:`, result);
+
+            // Update task status based on result
+            await new Promise(resolve => setTimeout(resolve, 100));
+            if (result.success) {
+              setTaskList(prev => prev.map((task, idx) =>
+                idx === i ? { ...task, status: 'completed', message: result.message } : task
+              ));
+              if (result.message) {
+                executionMessages.push(result.message);
+              }
+            } else {
+              setTaskList(prev => prev.map((task, idx) =>
+                idx === i ? { ...task, status: 'failed', message: result.message } : task
+              ));
+              allSuccessful = false;
+              executionMessages.push(result.message || `Failed: ${functionCall.function}`);
+              break; // Stop execution on failure
+            }
+
+            // Add delay between tasks to prevent React state conflicts
+            if (i < nlResponse.functionCalls.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay between tasks
+            }
+
+          } catch (error) {
+            logger.error(`Error in step ${i + 1}:`, error);
+            setTaskList(prev => prev.map((task, idx) =>
+              idx === i ? { ...task, status: 'failed', message: error.message } : task
+            ));
+            allSuccessful = false;
+            executionMessages.push(`Error in ${functionCall.function}: ${error.message}`);
+            break; // Stop execution on error
+          }
+        }
+
+        // Set final response for multi-step execution - make it human readable
+        const modelName = llmData.model || finalProvider;
+        const providerInfo = nlResponse.provider !== 'none' ? ` (via ${modelName})` : '';
+
+        // Create a more human-readable summary with model info
+        const taskSummary = nlResponse.functionCalls.map(call => {
+          const taskName = getFriendlyTaskName(call);
+          return `🟢 ${taskName}`;
+        }).join('\n');
+        const modelInfo = `🧠 ${modelName}`;
+        const combinedSummary = `${taskSummary}\n${modelInfo}`;
+
+        if (allSuccessful) {
+          const readableResponse = `**Executing Tasks:**
+
+${combinedSummary}
+
+${nlResponse.explanation}
+
+🎯 All ${nlResponse.functionCalls.length} tasks completed successfully!`;
+          setResponse(readableResponse);
+        } else {
+          setResponse(`${nlResponse.explanation}${providerInfo}\n\n⚠️ Workflow stopped due to errors. Check task list above.`);
+        }
+
+        return; // Exit after multi-step execution
+      }
+
+      // For single-step commands, execute directly
+      if (nlResponse.functionCalls.length === 1) {
+        const functionCall = nlResponse.functionCalls[0];
+
+        logger.info(`Executing single function: ${functionCall.function}`, functionCall.parameters);
+
+        // Update first task to running
+        setTaskList(prev => prev.map((task, idx) =>
+          idx === 0 ? { ...task, status: 'running' } : task
+        ));
+
+          let result;
+
+          switch (functionCall.function) {
+            // Discovery methods
+            case 'getTables':
+              result = await aiAPI.discovery.getTables();
+              break;
+            case 'getColumns':
+              result = await aiAPI.discovery.getColumns(functionCall.parameters);
+              break;
+            case 'getCountries':
+              result = await aiAPI.discovery.getCountries(functionCall.parameters);
+              break;
+            case 'getCurrentState':
+              result = await aiAPI.selection.getCurrent();
+              break;
+            case 'getCapabilities':
+              result = await aiAPI.system.getCapabilities();
+              break;
+
+            // Navigation methods
+            case 'navigateToView':
+              result = await aiAPI.visualization.navigateTo(functionCall.parameters.view);
+
+              // Extra safeguard: If navigating to DEA, ensure it happens
+              if (functionCall.parameters.view === 'dea') {
+                setTimeout(() => {
+                  if (!window.location.pathname.includes('dea')) {
+                    logger.info('🔄 DEA navigation may have failed, retrying with direct router...');
+                    router.push('/view_dea');
+                  }
+                }, 1000);
+              }
+              break;
+
+            // Data selection methods
+            case 'selectCountries':
+              result = await aiAPI.selection.setCountries(functionCall.parameters.countries || []);
+              break;
+            case 'selectIndicators':
+              result = await aiAPI.selection.setIndicators(functionCall.parameters.indicators || []);
+              break;
+            case 'clearSelections':
+              result = await aiAPI.selection.clear(functionCall.parameters);
+              break;
+
+            // Data manipulation methods
+            case 'filterData':
+              result = await aiAPI.data.query(functionCall.parameters);
+              break;
+
+            // Analysis methods
+            case 'runDEAAnalysis':
+              result = await aiAPI.analysis.runDEA(functionCall.parameters);
+              break;
+            case 'findCorrelations':
+              result = await aiAPI.analysis.correlations(functionCall.parameters);
+              break;
+            case 'analyzeTrends':
+              result = await aiAPI.analysis.trends(functionCall.parameters);
+              break;
+
+            // View-specific methods
+            case 'configureDeaAnalysis':
+              result = await aiAPI.views.dea.configureAnalysis({
+                inputs: functionCall.parameters.inputs || [],
+                outputs: functionCall.parameters.outputs || [],
+                modelType: functionCall.parameters.modelType || 'CCR',
+                orientation: functionCall.parameters.orientation || 'input',
+                countries: functionCall.parameters.countries
+              });
+              break;
+            case 'runDeaAnalysis':
+              result = await aiAPI.views.dea.runAnalysis();
+              break;
+            case 'configureChoropleth':
+              result = await aiAPI.views.choropleth.configure(functionCall.parameters);
+              break;
+            case 'configureCharts':
+              result = await aiAPI.views.charts.configure(functionCall.parameters);
+              break;
+
+            // Settings methods (placeholder - not implemented in API yet)
+            case 'setLabelFormat':
+              result = { success: false, message: 'setLabelFormat not implemented in AI API yet' };
+              break;
+
+            default:
+              logger.warning(`Unknown function: ${functionCall.function}`);
+              result = { success: false, message: `Unknown function: ${functionCall.function}` };
+          }
+
+          logger.info(`Function ${functionCall.function} result:`, result);
+
+        try {
+          if (result.success) {
+            // Update first task to completed
+            setTaskList(prev => prev.map((task, idx) =>
+              idx === 0 ? { ...task, status: 'completed', message: result.message } : task
+            ));
+
+            if (result.message) {
+              executionMessages.push(result.message);
+            }
+          } else {
+            allSuccessful = false;
+            // Update first task to failed
+            setTaskList(prev => prev.map((task, idx) =>
+              idx === 0 ? { ...task, status: 'failed', message: result.message || 'Failed' } : task
+            ));
+            executionMessages.push(result.message || `Failed to execute ${functionCall.function}`);
+          }
+        } catch (error) {
+          logger.error(`Error executing ${functionCall.function}:`, error);
+          allSuccessful = false;
+          executionMessages.push(`Error executing ${functionCall.function}: ${error.message}`);
+
+          // Update first task as failed
+          setTaskList(prev => prev.map((task, idx) =>
+            idx === 0 ? { ...task, status: 'failed', message: error.message } : task
+          ));
+        }
+      }
+
+      // Only set response for single-task executions
+      if (nlResponse.functionCalls.length === 0) {
+        setResponse(nlResponse.explanation);
+      } else if (nlResponse.functionCalls.length === 1) {
+        // Single task executed
+        const singleModelName = llmData.model || finalProvider;
+        const providerInfo = nlResponse.provider !== 'none' ? ` (via ${singleModelName})` : '';
+
+        if (allSuccessful) {
+          let responseText = nlResponse.explanation + providerInfo;
+          if (executionMessages.length > 0) {
+            responseText += '\n\n' + executionMessages.join('\n');
+          }
+          responseText += '\n\n🎯 Task completed successfully!';
+          setResponse(responseText);
+        } else {
+          setResponse(`${nlResponse.explanation}\n\n⚠️ Task failed:\n${executionMessages.join('\n')}`);
+        }
+      }
+      // Multi-step responses are handled earlier with early return
+
+      // Update suggestions
+      if (nlResponse.suggestedFollowUps) {
+        setSuggestions(nlResponse.suggestedFollowUps);
+      }
+
+      // Add to history
+      const historyItem: QueryHistoryItem = {
+        query: query.trim(),
+        timestamp: new Date(),
+        success: allSuccessful,
+        response: executionMessages.join('; ')
+      };
+
+      const newHistory = [historyItem, ...queryHistory].slice(0, 20); // Keep last 20
+      setQueryHistory(newHistory);
+      localStorage.setItem('nlQueryHistory', JSON.stringify(newHistory));
+
+      // Update conversation history
+      const newConversationHistory = [
+        ...messages,
+        { role: 'assistant', content: nlResponse.explanation }
+      ];
+      setConversationHistory(newConversationHistory);
+
+      // Clear input on success
+      if (allSuccessful) {
+        setQuery('');
+      }
+    } catch (error) {
+      logger.error('Query processing failed:', error);
+      setResponse('Sorry, I encountered an error processing your request. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSuggestionClick = (suggestion: string) => {
+    setQuery(suggestion);
+    setSuggestions([]);
+  };
+
+  const handleHistoryClick = (item: QueryHistoryItem) => {
+    setQuery(item.query);
+    setShowHistory(false);
+  };
+
+  const clearConversation = () => {
+    setConversationHistory([]);
+    setResponse('');
+    logger.info('🧹 Conversation cleared - next query will inject full context');
+  };
+
+  const getFriendlyTaskName = (functionCall: any): string => {
+    const params = functionCall.parameters || {};
+
+    switch (functionCall.function) {
+      case 'selectCountries':
+        return `Select countries: ${params.countries?.join(', ') || 'multiple countries'}`;
+      case 'navigateToView':
+        return `Navigate to ${params.view?.toUpperCase() || 'selected'} view`;
+      case 'configureDeaAnalysis': {
+        const inputs = params.inputs?.slice(0, 2).join(', ') || 'inputs';
+        const outputs = params.outputs?.slice(0, 2).join(', ') || 'outputs';
+        return `Configure DEA analysis (${inputs} → ${outputs})`;
+      }
+      case 'runDeaAnalysis':
+        return 'Run DEA analysis';
+      case 'configureChoropleth':
+        return `Configure choropleth map (${params.indicator || 'indicator'})`;
+      case 'configureCharts':
+        return `Configure ${params.chartType || 'chart'} visualization`;
+      case 'clearSelections':
+        return 'Clear current selections';
+      case 'selectIndicators':
+        return `Select indicators: ${params.indicators?.slice(0, 2).join(', ') || 'multiple indicators'}`;
+      default:
+        return functionCall.function.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+    }
+  };
+
+  const getContextualSuggestions = () => {
+    const suggestions = [];
+
+    switch (pathname) {
+      case '/view_choropleth':
+        suggestions.push(
+          'Change to 3D view',
+          'Filter by Nordic countries',
+          'Show press freedom indicators'
+        );
+        break;
+      case '/view_dea':
+        suggestions.push(
+          'Compare Germany and France',
+          'Add more input variables',
+          'Show efficiency frontier'
+        );
+        break;
+      case '/view_table':
+        suggestions.push(
+          'Export to CSV',
+          'Show correlation matrix',
+          'Switch to formatted labels'
+        );
+        break;
+      default:
+        suggestions.push(
+          'Compare the 3 largest vs. 3 smallest EU countries using DEA analysis',
+          'Show me the choropleth map',
+          'Compare Nordic countries'
+        );
+    }
+
+    return suggestions;
+  };
+
+  if (!isOpen) {
+    return (
+      <Fab
+        variant="extended"
+        color="primary"
+        aria-label="AI Research Assistant"
+        onClick={() => setIsOpen(true)}
+        sx={{
+          position: 'fixed',
+          bottom: 20,
+          right: 20,
+          zIndex: 1000,
+          px: 2,
+          py: 1,
+          fontSize: '0.9rem',
+          fontWeight: 600,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+          backdropFilter: 'blur(10px)',
+          background: 'linear-gradient(45deg, #1976d2 30%, #42a5f5 90%)',
+          '&:hover': {
+            transform: 'scale(1.05)',
+            boxShadow: '0 12px 40px rgba(0,0,0,0.3)',
+          },
+          transition: 'all 0.3s ease',
+        }}
+      >
+        <PsychologyIcon sx={{ mr: 1, fontSize: '1.2rem' }} />
+        AI Research Assistant
+      </Fab>
+    );
+  }
+
+  return (
+    <Box
+      sx={{
+        position: 'fixed',
+        bottom: position.y,
+        right: position.x,
+        width: size.width,
+        height: size.height,
+        zIndex: 1000,
+        cursor: isDragging ? 'grabbing' : 'default',
+      }}
+    >
+      <Paper
+        elevation={8}
+        sx={{
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          borderRadius: 2,
+          backgroundColor: 'background.paper',
+          border: '1px solid',
+          borderColor: 'divider',
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        {/* Drag Handle Header */}
+        <Box
+          onMouseDown={handleMouseDown}
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            p: 1,
+            backgroundColor: 'primary.main',
+            color: 'primary.contrastText',
+            cursor: isDragging ? 'grabbing' : 'grab',
+            userSelect: 'none',
+          }}
+        >
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <DragHandleIcon fontSize="small" />
+            <Typography variant="subtitle2">AI Assistant</Typography>
+          </Box>
+          <IconButton
+            size="small"
+            onClick={() => setIsOpen(false)}
+            sx={{ color: 'inherit' }}
+          >
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Box>
+
+        {/* Main Content Area */}
+        <Box sx={{ flex: 1, p: 2, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+        {/* Header */}
+        <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+          <SmartToyIcon sx={{ mr: 1, color: 'primary.main' }} />
+          <Typography variant="h6" sx={{ flexGrow: 1 }}>
+            AI Research Assistant
+            {conversationHistory.length > 0 && (
+              <Typography component="span" variant="caption" sx={{ ml: 1, opacity: 0.7 }}>
+                ({conversationHistory.length} msgs)
+              </Typography>
+            )}
+          </Typography>
+          <Tooltip title={`${currentModel.toUpperCase()}: ${llmConnected ? 'Connected' : 'Disconnected'}`}>
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                mr: 1
+              }}
+            >
+              <Typography variant="caption" sx={{ mr: 0.5, fontSize: '0.7rem' }}>
+                {currentModel.toUpperCase()}
+              </Typography>
+              <Box
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  backgroundColor: llmConnected ? 'success.main' : 'error.main',
+                }}
+              />
+            </Box>
+          </Tooltip>
+          <IconButton
+            size="small"
+            onClick={() => setShowHistory(!showHistory)}
+            color={showHistory ? 'primary' : 'default'}
+            title="Query History"
+          >
+            <HistoryIcon />
+          </IconButton>
+          <IconButton
+            size="small"
+            onClick={clearConversation}
+            disabled={conversationHistory.length === 0}
+            title="Clear Conversation"
+          >
+            <RefreshIcon />
+          </IconButton>
+          <IconButton size="small" onClick={() => setIsOpen(false)}>
+            <CloseIcon />
+          </IconButton>
+        </Box>
+
+        {/* Connection Warning */}
+        {!llmConnected && (
+          <Alert severity="warning" sx={{ mb: 2, fontSize: '0.875rem' }}>
+            {currentModel === 'none' ? 'No LLM model configured.' : `${currentModel.toUpperCase()} not connected.`} Using basic keyword matching.
+          </Alert>
+        )}
+
+        {/* Query History */}
+        {showHistory && queryHistory.length > 0 && (
+          <Paper variant="outlined" sx={{ mb: 2, maxHeight: 200, overflow: 'auto' }}>
+            <List dense>
+              {queryHistory.slice(0, 5).map((item, index) => (
+                <React.Fragment key={index}>
+                  <ListItem
+                    onClick={() => handleHistoryClick(item)}
+                    sx={{ py: 0.5, cursor: 'pointer' }}
+                  >
+                    <ListItemText
+                      primary={item.query}
+                      secondary={item.timestamp.toLocaleTimeString()}
+                      primaryTypographyProps={{ fontSize: '0.875rem' }}
+                      secondaryTypographyProps={{ fontSize: '0.75rem' }}
+                    />
+                    <Box
+                      sx={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: '50%',
+                        backgroundColor: item.success ? 'success.main' : 'error.main',
+                      }}
+                    />
+                  </ListItem>
+                  {index < Math.min(4, queryHistory.length - 1) && <Divider />}
+                </React.Fragment>
+              ))}
+            </List>
+          </Paper>
+        )}
+
+        {/* Input Form */}
+        <Box component="form" onSubmit={handleSubmit} sx={{ mb: 2 }}>
+          <TextField
+            ref={inputRef}
+            fullWidth
+            variant="outlined"
+            placeholder={t("Ask me anything about the data...")}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            disabled={isLoading}
+            InputProps={{
+              endAdornment: (
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  {isLoading ? (
+                    <CircularProgress size={20} />
+                  ) : (
+                    <IconButton
+                      type="submit"
+                      disabled={!query.trim()}
+                      size="small"
+                    >
+                      <SendIcon />
+                    </IconButton>
+                  )}
+                </Box>
+              ),
+            }}
+            sx={{ fontSize: '0.875rem' }}
+          />
+        </Box>
+
+        {/* Task List */}
+        {taskList.length > 0 && (
+          <Paper
+            variant="outlined"
+            sx={{
+              p: 1.5,
+              mb: 2,
+              backgroundColor: 'action.hover',
+            }}
+          >
+            <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 1 }}>
+              Executing Tasks:
+            </Typography>
+            {taskList.map((task, index) => (
+              <Box key={index} sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    mr: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor:
+                      task.status === 'completed' ? 'success.main' :
+                      task.status === 'failed' ? 'error.main' :
+                      task.status === 'running' ? 'warning.main' : 'grey.400'
+                  }}
+                >
+                  {task.status === 'running' && (
+                    <CircularProgress size={12} sx={{ color: 'white' }} />
+                  )}
+                  {task.status === 'completed' && (
+                    <Typography sx={{ color: 'white', fontSize: '10px' }}>🎯</Typography>
+                  )}
+                  {task.status === 'failed' && (
+                    <Typography sx={{ color: 'white', fontSize: '10px' }}>❌</Typography>
+                  )}
+                </Box>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    flexGrow: 1,
+                    opacity: task.status === 'pending' ? 0.6 : 1,
+                    textDecoration: task.status === 'completed' ? 'line-through' : 'none'
+                  }}
+                >
+                  {task.name}
+                </Typography>
+              </Box>
+            ))}
+          </Paper>
+        )}
+
+        {/* Response */}
+        {response && (
+          <Fade in={!!response}>
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.5,
+                mb: 2,
+                backgroundColor: 'action.hover',
+              }}
+            >
+              <Typography variant="body2">{response}</Typography>
+            </Paper>
+          </Fade>
+        )}
+
+        {/* Suggestions */}
+        {(suggestions.length > 0 || !showHistory) && (
+          <Box>
+            <Typography variant="caption" color="textSecondary" sx={{ mb: 1, display: 'block' }}>
+              {suggestions.length > 0 ? 'Suggested follow-ups:' : 'Try asking:'}
+            </Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+              {(suggestions.length > 0 ? suggestions : getContextualSuggestions()).map((suggestion, index) => (
+                <Chip
+                  key={index}
+                  label={suggestion}
+                  size="small"
+                  variant="outlined"
+                  onClick={() => handleSuggestionClick(suggestion)}
+                  sx={{ fontSize: '0.75rem', cursor: 'pointer' }}
+                />
+              ))}
+            </Box>
+          </Box>
+        )}
+        </Box>
+
+        {/* Resize Handle */}
+        <Box
+          onMouseDown={handleResizeStart}
+          sx={{
+            position: 'absolute',
+            bottom: 0,
+            right: 0,
+            width: 24,
+            height: 24,
+            cursor: 'nw-resize',
+            background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(0,0,0,0.1) 100%)',
+            backdropFilter: 'blur(8px)',
+            borderTopLeftRadius: 2,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: '1px solid rgba(255,255,255,0.2)',
+            borderRight: 'none',
+            borderBottom: 'none',
+            transition: 'all 0.2s ease',
+            '&:hover': {
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(0,0,0,0.15) 100%)',
+              transform: 'scale(1.05)',
+            },
+            '&:active': {
+              transform: 'scale(0.95)',
+            }
+          }}
+        >
+          <Box sx={{
+            width: 12,
+            height: 12,
+            display: 'grid',
+            gridTemplateColumns: '3px 3px',
+            gridTemplateRows: '3px 3px',
+            gap: 1,
+            opacity: 0.7,
+            '& > div': {
+              backgroundColor: 'rgba(255,255,255,0.8)',
+              borderRadius: '50%',
+            }
+          }}>
+            <Box />
+            <Box />
+            <Box />
+            <Box />
+          </Box>
+        </Box>
+      </Paper>
+    </Box>
+  );
+};
+
+export default NaturalLanguageInterface;

@@ -1,0 +1,41 @@
+.container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px;
+}
+
+.chartContainer {
+  width: 100%;
+  max-width: 1200px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 50px;
+}
+
+.noDataText {
+  font-size: 1.2rem;
+  color: #666;
+  text-align: center;
+  margin-top: 2rem;
+}
+
+.plot {
+  width: 100% !important;
+  height: 100% !important;
+  display: flex;
+  justify-content: center;
+}
+
+.legendContainer {
+  margin-top: 400px;
+  margin-bottom: 40px;
+}
+
+.resetButton {
+  margin-bottom: 40px;
+  margin-top: 40px;
+}

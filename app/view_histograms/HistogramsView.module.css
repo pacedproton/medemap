@@ -1,0 +1,41 @@
+.container {
+        width: 100%;
+        padding: 40px;
+      }
+      
+      .progressBar {
+        margin-bottom: 20px;
+      }
+      
+      .colorRangeContainer {
+        margin-bottom: 16px;
+        width: 50%;
+      }
+      
+      .binCountContainer {
+        margin-bottom: 18px;
+        width: 50%;
+      }
+      
+      .chartContainer {
+        margin-bottom: 20px;
+      }
+      
+      .chartTitlePaper {
+        margin-bottom: 20px;
+        padding: 15px 25px;
+        background-color: #f0f8ff !important;
+        border-left: 5px solid #1976d2;
+      }
+      
+      .chartTitle {
+        color: #1976d2;
+        font-weight: 600;
+        text-transform: capitalize;
+        letter-spacing: 0.5px;
+      }
+      
+      .chart {
+        width: 900px;
+        height: 500px;
+      }

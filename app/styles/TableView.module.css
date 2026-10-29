@@ -1,0 +1,39 @@
+.tableContainer {
+        width: 100%;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      
+      .tableTitle {
+        font-size: 2rem;
+        color: #1976d2;
+        margin-bottom: 0.5rem;
+        text-transform: capitalize;
+      }
+      
+      .exportNote {
+        font-style: italic;
+        color: #666;
+        margin-bottom: 1rem;
+      }
+      
+      .agGridWrapper {
+        margin-bottom: 40px;
+      }
+      
+      .fullWidthGrid {
+        width: 100% !important;
+        height: 400px !important;
+        margin-top: 10px;
+      }
+      
+      .tableHeader {
+        background-color: #f0f8ff;
+        padding: 1rem;
+        border-radius: 4px 4px 0 0;
+        border-bottom: 2px solid #1976d2;
+      }
+      
+      .tableContainer > .agGridWrapper:not(:first-child) {
+        margin-top: 60px;
+      }

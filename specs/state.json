@@ -1,0 +1,108 @@
+{
+  "project": "MeDeMAP-app",
+  "env": {
+    "build_cmd": "bun run build",
+    "test_cmd": "bun run test"
+  },
+  "items": [
+    {
+      "id": "SEC-001",
+      "scope": "repo",
+      "title": "No secrets manifest is tracked, .env.local is gitignored, and the removed Kubernetes folder stays gone",
+      "oracle_type": "artifact",
+      "oracle_cmd": "! git ls-files | grep -q 'medemap-secrets.yaml' && git check-ignore -q .env.local && ! test -d Kubernetes && ! git ls-files | grep -q '^Kubernetes/'",
+      "status": "OPEN",
+      "verified_at": null
+    },
+    {
+      "id": "SEC-002",
+      "scope": "app/components",
+      "title": "No hardcoded Cesium Ion JWT in tracked files",
+      "oracle_type": "artifact",
+      "oracle_cmd": "! git ls-files -z | grep -zv bun.lock | xargs -0 grep -lE 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.eyJqdGkiOiIx' 2>/dev/null | grep -q .",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T16:15:52.918794+01:00"
+    },
+    {
+      "id": "OS-001",
+      "scope": "openshift",
+      "title": "OpenShift manifests, Argo Application and DB resource are accepted by the API server (server-side dry-run); Dockerfile has a non-root user and no secrets",
+      "oracle_type": "integration",
+      "oracle_cmd": "oc get ns medemap >/dev/null && oc apply --dry-run=server -f openshift/medemap.yaml -f openshift/db/medemap-database.yaml -f argocd/medemap.yaml >/dev/null && grep -q '^USER 1001' openshift/Dockerfile && ! grep -rIE --exclude=create-secrets.sh --exclude=check-public-safe.sh 'eyJhbGci|PASSWORD=.{4,}' openshift argocd",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:57.432198+01:00"
+    },
+    {
+      "id": "APP-001",
+      "scope": "app/api/health",
+      "title": "Readiness probe reports ready iff the database answers SELECT 1 (was always 503: called a Redux thunk as a function)",
+      "oracle_type": "unit",
+      "oracle_cmd": "bunx jest app/api/health",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:58.101181+01:00"
+    },
+    {
+      "id": "SEC-003",
+      "scope": "openshift/db",
+      "title": "App DB role medemap_app is read-only (plus log INSERT); owner role cannot log in; PUBLIC cannot connect",
+      "oracle_type": "integration",
+      "oracle_cmd": "d=$(mktemp -d) && cp openshift/db/app-role.test.mjs \"$d/test.mjs\" && (cd \"$d\" && npm init -y >/dev/null 2>&1 && npm i @electric-sql/pglite >/dev/null 2>&1 && node test.mjs \"$OLDPWD/openshift/db/app-role.sql\" >/dev/null)",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T21:57:21.656090+01:00"
+    },
+    {
+      "id": "SEC-004",
+      "scope": "app/api, lib/security, proxy",
+      "title": "Auth gate no longer matches every path; /api/llm needs a session, clamps model/tokens, rate limits, hides upstream errors; /api/metrics needs a token; log endpoint input is bounded",
+      "oracle_type": "unit",
+      "oracle_cmd": "bunx jest lib/security app/api/llm app/api/metrics app/api/health",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:52.339656+01:00"
+    },
+    {
+      "id": "SEC-005",
+      "scope": "openshift",
+      "title": "Deployment has read-only root, no service-account token; NetworkPolicy restricts ingress to the tunnel and egress to DNS, Postgres, 443, Ollama",
+      "oracle_type": "integration",
+      "oracle_cmd": "grep -q 'readOnlyRootFilesystem: true' openshift/medemap.yaml && grep -q 'automountServiceAccountToken: false' openshift/medemap.yaml && grep -q 'kind: NetworkPolicy' openshift/medemap.yaml && oc apply --dry-run=server -f openshift/medemap.yaml >/dev/null",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:52.667127+01:00"
+    },
+    {
+      "id": "SEC-006",
+      "scope": "app/api/llm, lib/ai, AIAccessModal",
+      "title": "AI assistant is gated by one shared AI_ACCESS_KEY (constant-time, per-IP lockout, rate limits); the dialog shows the contact email for requesting a key (no form, no mail sending); model is gpt-6.1-sol; public status endpoint leaks nothing",
+      "oracle_type": "unit",
+      "oracle_cmd": "bunx jest lib/security lib/ai app/api/llm app/components/AIAccessModal && ! test -e app/api/request-access/route.ts && ! test -d lib/mail",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:54.669251+01:00"
+    },
+    {
+      "id": "SEC-007",
+      "scope": "repo",
+      "title": "Tracked/unignored files carry no private (tailscale/LAN) addresses, no personal email, and no secret values, so the repo can be public",
+      "oracle_type": "artifact",
+      "oracle_cmd": "bash openshift/check-public-safe.sh",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:54.962787+01:00"
+    },
+    {
+      "id": "SEC-008",
+      "scope": "package.json, bun.lock",
+      "title": "No critical/high advisory against the version of any request-serving dependency (next, next-auth, @auth/core, axios, pg, js-yaml, ...); xlsx and @types/axios removed",
+      "oracle_type": "artifact",
+      "oracle_cmd": "node openshift/check-deps.mjs",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:55.548660+01:00"
+    },
+    {
+      "id": "SEC-009",
+      "scope": "auth, profiles, proxy, api",
+      "title": "Login throttling and timing-equal checks, profile-id path traversal closed, no internal error text in responses, security headers on every response, unused /api/loopbacktest removed",
+      "oracle_type": "unit",
+      "oracle_cmd": "bunx jest lib/auth lib/profiles lib/security app/api/profiles && ! test -e app/api/loopbacktest/route.ts",
+      "status": "VERIFIED",
+      "verified_at": "2026-10-26T23:16:56.742782+01:00"
+    }
+  ]
+}

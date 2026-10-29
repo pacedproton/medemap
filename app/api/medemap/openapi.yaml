@@ -1,0 +1,81 @@
+openapi: 3.0.0
+info:
+  title: MeDeMAP API
+  version: 1.0.0
+  description: API for retrieving MeDeMAP data
+
+paths:
+  /api/medemap:
+    get:
+      summary: Retrieve MeDeMAP data
+      description: Fetches data from multiple tables in the MeDeMAP database and returns it along with column options.
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:    
+              schema:
+                type: object
+                properties:
+                  demand_side_trust_in_media:
+                    type: array
+                    items:
+                      type: object
+                  basic_data:
+                    type: array
+                    items:
+                      type: object
+                  demand_side_media_use:
+                    type: array
+                    items:
+                      type: object
+                  democracy:
+                    type: array
+                    items:
+                      type: object
+                  legal_framework_equality:
+                    type: array
+                    items:
+                      type: object
+                  legal_framework_freedom:
+                    type: array
+                    items:
+                      type: object
+                  legal_framework_human_dignity:
+                    type: array
+                    items:
+                      type: object
+                  legal_framework_pluralism:
+                    type: array
+                    items:
+                      type: object
+                  legal_framework_rule_of_law:
+                    type: array
+                    items:
+                      type: object
+                  supply_side:
+                    type: array
+                    items:
+                      type: object
+                  columnOptions:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          value:
+                            type: string
+                          label:
+                            type: string
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  details:
+                    type: string

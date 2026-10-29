@@ -1,0 +1,74 @@
+.imprintButton {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0;
+        font: inherit;
+        color: inherit;
+        text-decoration: underline;
+      }
+      
+      .styledDialog {
+        content: none;
+      }
+      
+      .styledDialogTitle {
+        margin: 0;
+        padding: 16px;
+        background-color: #087aeb;
+        color: #ffffff;
+      }
+      
+      .closeButton {
+        position: absolute;
+        right: 8px;
+        top: 8px;
+        color: #ffffff;
+      }
+      
+      .dialogContent {
+        padding: 24px;
+        background-color: #ffffff;
+        color: #ffffff;
+      }
+      
+      .dialogActions {
+        padding: 8px;
+        background-color: #2c3e50;
+      }
+      
+      .closeButton:hover {
+        background-color: rgba(199, 198, 202, 0.1);
+      }
+
+      .dialogContent,
+      .dialogActions {
+        color: #000000;
+      }
+      .vspace20 {
+        margin-top: 20px;
+        margin-bottom: 20px;
+      }
+
+.teamCard {
+  background-color: #f5f5f5;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.teamTitle {
+  color: #1976d2;
+  margin-bottom: 16px;
+}
+
+.teamSection {
+  margin-bottom: 16px;
+}
+
+.teamSection:last-child {
+  margin-bottom: 0;
+}
+
+.dialogActions {
+  background-color: #f0f0f0;
+}

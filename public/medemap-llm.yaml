@@ -1,0 +1,84 @@
+# MeDeMAP LLM Configuration
+# This file configures Language Model providers for the AI assistant
+
+llm:
+  # Primary provider (first choice) - Using OpenAI GPT-6.1 Sol
+  primary:
+    provider: openai
+    model: gpt-6.1-sol  # Latest available model
+    baseUrl: https://api.openai.com/v1
+    apiKey: ${OPENAI_API_KEY}  # Loaded from environment variable
+    temperature: 0.1
+    maxTokens: 4000
+    timeout: 30000
+
+  # Fallback providers (tried if primary fails)
+  fallbacks:
+    - provider: ollama
+      model: gemma3:4b
+      baseUrl: ${OLLAMA_URL}  # Use environment variable for remote server
+      temperature: 0.1
+      maxTokens: 4000
+      timeout: 180000  # Longer timeout for remote models
+
+    - provider: claude
+      model: claude-3-5-sonnet-20241022
+      baseUrl: https://api.anthropic.com/v1
+      apiKey: ${ANTHROPIC_API_KEY}  # Environment variable
+      temperature: 0.1
+      maxTokens: 4000
+      timeout: 30000
+
+  # Global preferences
+  preferences:
+    autoFallback: true      # Try fallbacks if primary fails
+    cacheResponses: true    # Cache responses for performance
+    timeoutMs: 60000        # Global timeout in milliseconds (increased)
+
+# Environment Variables:
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+
+# Alternative configurations for different scenarios:
+
+# Remote Ollama (for non-local access):
+# llm:
+#   primary:
+#     provider: ollama
+#     model: gemma3:4b
+#     baseUrl: http://your-server-ip:11434  # Replace with your server's IP/domain
+#     timeout: 180000
+#   preferences:
+#     autoFallback: false
+#
+# Example remote configurations:
+# - Docker container: http://your-ollama-host:11434
+# - Remote server: http://ollama.yourcompany.com:11434
+# - Kubernetes service: http://ollama-service.default.svc.cluster.local:11434
+#
+# IMPORTANT: Ensure your Ollama server allows external connections:
+# 1. Start Ollama with: OLLAMA_HOST=0.0.0.0 ollama serve
+# 2. Or use Docker: docker run -p 11434:11434 -e OLLAMA_HOST=0.0.0.0 ollama/ollama
+
+# Local-only (privacy-focused):
+# llm:
+#   primary:
+#     provider: ollama
+#     model: llama3:8b
+#     baseUrl: http://localhost:11434
+#     timeout: 180000
+#   preferences:
+#     autoFallback: false
+
+# Cloud-first (performance-focused):
+# llm:
+#   primary:
+#     provider: openai
+#     model: gpt-4
+#     apiKey: ${OPENAI_API_KEY}
+#   fallbacks:
+#     - provider: claude
+#       model: claude-3-sonnet
+#       apiKey: ${ANTHROPIC_API_KEY}
+#   preferences:
+#     autoFallback: true

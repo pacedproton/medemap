@@ -1,0 +1,401 @@
+/**
+ * Server-side LLM API Route
+ *
+ * This proxies LLM requests through the server to avoid CORS issues
+ * and enable non-local Ollama access
+ */
+
+import { NextRequest, NextResponse } from 'next/server';
+import { serverLogger } from '../../../lib/logging/serverLogger';
+import yaml from 'js-yaml';
+import fs from 'fs';
+import path from 'path';
+
+// Load configuration from server-side
+function loadLLMConfig() {
+  try {
+    // Try to load YAML config from project root
+    const configPath = path.join(process.cwd(), 'public', 'medemap-llm.yaml');
+    if (fs.existsSync(configPath)) {
+      const fileContents = fs.readFileSync(configPath, 'utf8');
+      const config = yaml.load(fileContents) as any;
+
+      // Replace environment variables
+      const configStr = JSON.stringify(config);
+      const processedStr = configStr.replace(/\$\{(\w+)\}/g, (_, key) => {
+        return process.env[key] || '';
+      });
+
+      return JSON.parse(processedStr);
+    }
+  } catch (error) {
+    serverLogger.error('Failed to load LLM config:', error);
+  }
+
+  // Default configuration - prioritize OpenAI if API key is available
+  serverLogger.info('Environment check - OPENAI_API_KEY present:', !!process.env.OPENAI_API_KEY);
+  serverLogger.info('Environment check - OPENAI_API_KEY length:', process.env.OPENAI_API_KEY?.length || 0);
+  if (process.env.OPENAI_API_KEY) {
+    return {
+      llm: {
+        primary: {
+          provider: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-4o',
+          apiKey: process.env.OPENAI_API_KEY,
+          temperature: 0.1,
+          maxTokens: 4000,
+          timeout: 30000
+        },
+        fallbacks: [{
+          provider: 'ollama',
+          baseUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+          model: 'gemma3:4b',
+          timeout: 180000
+        }]
+      }
+    };
+  }
+
+  // Fallback to Ollama if no OpenAI key
+  return {
+    llm: {
+      primary: {
+        provider: 'ollama',
+        baseUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+        model: 'gemma3:4b',
+        timeout: 180000
+      }
+    }
+  };
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    serverLogger.info('LLM API: Received POST request');
+    const body = await request.json();
+    serverLogger.info('LLM API: Request body:', { ...body, messages: `[${body.messages?.length || 0} messages]` });
+
+    const { provider, messages, model, temperature, maxTokens, disableFallback, exclusiveMode } = body;
+
+    if (!messages || !Array.isArray(messages)) {
+      throw new Error('Messages array is required');
+    }
+
+    const config = loadLLMConfig();
+    serverLogger.info('LLM API: Loaded config, disableFallback:', disableFallback, 'exclusiveMode:', exclusiveMode);
+
+    // When disableFallback or exclusiveMode is true, use ONLY the requested provider
+    let providerConfig;
+    if (disableFallback || exclusiveMode) {
+      serverLogger.info(`🎯 LLM API: Exclusive mode - using ONLY provider: ${provider}`);
+
+      // Find the exact requested provider or throw error
+      if (config.llm.primary.provider === provider) {
+        providerConfig = config.llm.primary;
+      } else if (config.llm.fallbacks) {
+        providerConfig = config.llm.fallbacks.find((f: any) => f.provider === provider);
+      }
+
+      if (!providerConfig) {
+        throw new Error(`❌ Provider '${provider}' not configured and fallback/exclusive mode is enabled`);
+      }
+
+      serverLogger.info(`✅ LLM API: Found exclusive provider config for ${provider}`);
+    } else {
+      // Original fallback logic
+      providerConfig = config.llm.primary.provider === provider
+        ? config.llm.primary
+        : config.llm.fallbacks?.find((f: any) => f.provider === provider) || config.llm.primary;
+    }
+
+    serverLogger.info('LLM API: Using provider config:', {
+      provider: providerConfig.provider,
+      model: model || providerConfig.model,
+      hasApiKey: !!providerConfig.apiKey
+    });
+
+    // Handle different providers with exclusive mode validation
+    serverLogger.info(`🚀 LLM API: Processing with provider ${providerConfig.provider} (exclusive: ${!!(disableFallback || exclusiveMode)})`);
+
+    switch (providerConfig.provider) {
+      case 'ollama':
+        serverLogger.info('LLM API: Calling handleOllama');
+        return await handleOllama(providerConfig, messages, model || providerConfig.model);
+
+      case 'openai':
+        serverLogger.info('LLM API: Calling handleOpenAI');
+        return await handleOpenAI(providerConfig, messages, model || providerConfig.model, temperature, maxTokens);
+
+      case 'claude':
+        serverLogger.info('LLM API: Calling handleClaude');
+        return await handleClaude(providerConfig, messages, model || providerConfig.model, temperature, maxTokens);
+
+      default:
+        throw new Error(`❌ Unknown provider: ${providerConfig.provider}`);
+    }
+  } catch (error: any) {
+    serverLogger.error('LLM API error:', error);
+    return NextResponse.json(
+      { error: error.message || 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
+
+async function handleOllama(config: any, messages: any[], model: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.timeout || 180000);
+
+  try {
+    const response = await fetch(`${config.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        options: {
+          temperature: config.temperature || 0.1,
+          num_predict: config.maxTokens || 4000,
+        }
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Ollama error: ${error}`);
+    }
+
+    const data = await response.json();
+    return NextResponse.json({
+      content: data.message?.content || '',
+      model: data.model,
+      provider: 'ollama',
+      usage: {
+        prompt_tokens: data.prompt_eval_count,
+        completion_tokens: data.eval_count,
+      }
+    });
+
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
+}
+
+async function handleOpenAI(config: any, messages: any[], model: string, temperature?: number, maxTokens?: number) {
+  serverLogger.info('OpenAI Handler: Starting request');
+
+  if (!config.apiKey) {
+    serverLogger.error('OpenAI Handler: No API key configured');
+    throw new Error('OpenAI API key not configured');
+  }
+
+  // All OpenAI models including GPT-5 use the standard chat completions API
+  const endpoint = `${config.baseUrl}/chat/completions`;
+
+  serverLogger.info('OpenAI Handler: Using standard chat completions API');
+  serverLogger.info('OpenAI Handler: Request params:', {
+    model,
+    messageCount: messages.length,
+    temperature: temperature || config.temperature || 0.1,
+    endpoint
+  });
+
+  try {
+    // Standard chat completions format for all models
+    const requestBody: any = {
+      model,
+      messages,
+    };
+
+    // GPT-5 has stricter parameter validation and different requirements
+    if (model.includes('gpt-5')) {
+      requestBody.max_completion_tokens = maxTokens || config.maxTokens || 4000;
+
+      // ⭐ CRITICAL FIX: GPT-5 only supports temperature = 1 (default)
+      // Remove temperature parameter entirely to use default
+      serverLogger.info('GPT-5 detected: Using default temperature (1.0) - custom temperature not supported');
+      // Don't set temperature for GPT-5 - it only supports the default value of 1
+
+      // Optional: Add reasoning effort for faster responses
+      // requestBody.reasoning_effort = 'minimal';
+    } else {
+      // Standard GPT models support custom temperature
+      requestBody.max_tokens = maxTokens || config.maxTokens || 4000;
+      requestBody.temperature = temperature || config.temperature || 0.1;
+      serverLogger.info(`Using temperature ${requestBody.temperature} for model ${model}`);
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    serverLogger.info('OpenAI Handler: Response status:', response.status);
+
+    if (!response.ok) {
+      const error = await response.text();
+      serverLogger.error('OpenAI Handler: API error response:', error);
+      throw new Error(`OpenAI error: ${error}`);
+    }
+
+    const data = await response.json();
+
+    // All models including GPT-5 use the same response format
+    let content = data.choices?.[0]?.message?.content || '';
+    const usage = data.usage || {};
+
+    // Log response details for debugging
+    serverLogger.info('OpenAI Handler: Response details:', {
+      model: data.model || model,
+      hasChoices: !!data.choices,
+      choicesLength: data.choices?.length || 0,
+      contentLength: content.length,
+      contentType: typeof content
+    });
+
+    // Final validation - ensure content is a string
+    if (!content || typeof content !== 'string') {
+      serverLogger.warning('OpenAI Handler: Invalid content, defaulting to empty string');
+      content = '';
+    }
+
+    serverLogger.info('OpenAI Handler: Success, response data:', {
+      model: data.model || model,
+      contentLength: content.length,
+      contentType: typeof content,
+      usage
+    });
+
+    return NextResponse.json({
+      content: content || '',
+      model: data.model || model,
+      provider: 'openai',
+      usage
+    });
+  } catch (error: any) {
+    serverLogger.error('OpenAI Handler: Caught error:', error.message);
+    throw error;
+  }
+}
+
+async function handleClaude(config: any, messages: any[], model: string, temperature?: number, maxTokens?: number) {
+  if (!config.apiKey) {
+    throw new Error('Claude API key not configured');
+  }
+
+  // Convert messages to Claude format
+  const system = messages.find(m => m.role === 'system')?.content || '';
+  const claudeMessages = messages.filter(m => m.role !== 'system').map(m => ({
+    role: m.role === 'assistant' ? 'assistant' : 'user',
+    content: m.content
+  }));
+
+  const response = await fetch(`${config.baseUrl}/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model,
+      system,
+      messages: claudeMessages,
+      temperature: temperature || config.temperature || 0.1,
+      max_tokens: maxTokens || config.maxTokens || 4000,
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Claude error: ${error}`);
+  }
+
+  const data = await response.json();
+  return NextResponse.json({
+    content: data.content[0]?.text || '',
+    model: data.model,
+    provider: 'claude',
+    usage: data.usage
+  });
+}
+
+// GET endpoint for testing connectivity
+export async function GET() {
+  const config = loadLLMConfig();
+
+  try {
+    // Test primary provider connectivity
+    const testResults: any = {
+      primary: {
+        provider: config.llm.primary.provider,
+        baseUrl: config.llm.primary.baseUrl,
+        model: config.llm.primary.model,
+        connected: false
+      }
+    };
+
+    if (config.llm.primary.provider === 'ollama') {
+      try {
+        const response = await fetch(`${config.llm.primary.baseUrl}/api/tags`, {
+          signal: AbortSignal.timeout(5000)
+        });
+        testResults.primary.connected = response.ok;
+        if (response.ok) {
+          const data = await response.json();
+          testResults.primary.models = data.models?.map((m: any) => m.name);
+        }
+      } catch (error) {
+        testResults.primary.error = error.message;
+      }
+    } else if (config.llm.primary.provider === 'openai') {
+      try {
+        if (!config.llm.primary.apiKey) {
+          testResults.primary.error = 'No API key configured';
+        } else {
+          // Test OpenAI connection with a simple request
+          const response = await fetch(`${config.llm.primary.baseUrl}/models`, {
+            headers: {
+              'Authorization': `Bearer ${config.llm.primary.apiKey}`
+            },
+            signal: AbortSignal.timeout(10000)
+          });
+          testResults.primary.connected = response.ok;
+          if (response.ok) {
+            const data = await response.json();
+            testResults.primary.models = data.data?.map((m: any) => m.id);
+          } else {
+            const error = await response.text();
+            testResults.primary.error = `OpenAI API error: ${error}`;
+          }
+        }
+      } catch (error) {
+        testResults.primary.error = error.message;
+      }
+    }
+
+    return NextResponse.json(testResults);
+
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message || 'Failed to test connectivity' },
+      { status: 500 }
+    );
+  }
+}

@@ -1,0 +1,1326 @@
+"use client";
+
+import React, { useState, useEffect, useMemo } from "react";
+import { logger } from "../../lib/logging/logger";
+import {
+  Box,
+  Container,
+  Typography,
+  Paper,
+  Grid,
+  Button,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Chip,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  CircularProgress,
+  Alert,
+  Tabs,
+  Tab,
+  TextField,
+  IconButton,
+  Tooltip,
+} from "@mui/material";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  Legend,
+  ResponsiveContainer,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  Radar,
+  ScatterChart,
+  Scatter,
+} from "recharts";
+import dynamic from "next/dynamic";
+import { useAppSelector, useAppDispatch } from "../../lib/hooks";
+import {
+  fetchMedeMapData,
+  selectMedeMapData,
+} from "../../lib/features/medemap/medeMapSlice";
+import { selectLabelDisplayMode } from "../../lib/features/settings/labelDisplaySlice";
+import { formatIndicatorLabel } from "../../lib/utils/labelFormatter";
+import InfoIcon from "@mui/icons-material/Info";
+import DownloadIcon from "@mui/icons-material/Download";
+import styles from "./DEAAnalysisView.module.css";
+
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
+
+interface DMU {
+  name: string;
+  inputs: { [key: string]: number };
+  outputs: { [key: string]: number };
+  efficiency?: number;
+  slack?: { [key: string]: number };
+  peers?: string[];
+  lambda?: { [key: string]: number };
+}
+
+const DEAAnalysisView: React.FC = () => {
+  const dispatch = useAppDispatch();
+  const medeMapState = useAppSelector(selectMedeMapData);
+  const labelDisplayMode = useAppSelector(selectLabelDisplayMode);
+  const [selectedInputs, setSelectedInputs] = useState<string[]>([]);
+  const [selectedOutputs, setSelectedOutputs] = useState<string[]>([]);
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
+
+  // AI API Integration: Listen to Redux selectedCountries changes with debouncing
+  useEffect(() => {
+    if (
+      medeMapState.selectedCountries &&
+      medeMapState.selectedCountries.length > 0
+    ) {
+      logger.info(
+        "DEA: AI API selectedCountries from Redux:",
+        medeMapState.selectedCountries
+      );
+
+      // Debounce the state update to prevent cascading effects
+      const timeoutId = setTimeout(() => {
+        setSelectedCountries(medeMapState.selectedCountries);
+      }, 100);
+
+      return () => clearTimeout(timeoutId);
+    }
+  }, [medeMapState.selectedCountries]);
+
+  // AI API Integration: Listen for DEA configuration from AI
+  useEffect(() => {
+    const handleDeaConfigUpdated = (event: CustomEvent) => {
+      const config = event.detail;
+      logger.info("DEA: AI API configuration received:", config);
+
+      if (config.inputs && Array.isArray(config.inputs)) {
+        logger.info("🔧 Setting inputs from AI:", config.inputs);
+        setSelectedInputs(config.inputs);
+      }
+
+      if (config.outputs && Array.isArray(config.outputs)) {
+        logger.info("🔧 Setting outputs from AI:", config.outputs);
+        setSelectedOutputs(config.outputs);
+      }
+
+      if (config.modelType) {
+        logger.info("🔧 Setting model type from AI:", config.modelType);
+        setModelType(config.modelType);
+      }
+
+      if (config.orientation) {
+        logger.info("🔧 Setting orientation from AI:", config.orientation);
+        setOrientation(config.orientation);
+      }
+    };
+
+    const handleDeaRunAnalysis = () => {
+      logger.info("🚀 AI API triggered DEA analysis run");
+      calculateDEA();
+    };
+
+    // Listen for AI configuration events
+    if (typeof window !== "undefined") {
+      window.addEventListener(
+        "deaConfigUpdated",
+        handleDeaConfigUpdated as EventListener
+      );
+      window.addEventListener(
+        "deaRunAnalysis",
+        handleDeaRunAnalysis as EventListener
+      );
+    }
+
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener(
+          "deaConfigUpdated",
+          handleDeaConfigUpdated as EventListener
+        );
+        window.removeEventListener(
+          "deaRunAnalysis",
+          handleDeaRunAnalysis as EventListener
+        );
+      }
+    };
+  }, []);
+
+  const [dmuData, setDmuData] = useState<DMU[]>([]);
+  const [deaResults, setDeaResults] = useState<DMU[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState(0);
+  const [modelType, setModelType] = useState<"CCR" | "BCC">("CCR");
+  const [orientation, setOrientation] = useState<"input" | "output">("input");
+
+  // Prepare 3D visualization data - moved outside of conditional rendering
+  const plot3DData = useMemo(() => {
+    if (
+      deaResults.length === 0 ||
+      selectedInputs.length === 0 ||
+      selectedOutputs.length === 0
+    ) {
+      return null;
+    }
+
+    // Calculate aggregated inputs and outputs for each DMU
+    const dmuPoints = deaResults.map((dmu) => ({
+      name: dmu.name,
+      inputSum: Object.values(dmu.inputs).reduce((sum, val) => sum + val, 0),
+      outputSum: Object.values(dmu.outputs).reduce((sum, val) => sum + val, 0),
+      efficiency: dmu.efficiency || 0,
+    }));
+
+    // Separate efficient and inefficient DMUs
+    const efficientDMUs = dmuPoints.filter((d) => d.efficiency >= 99.9);
+    const inefficientDMUs = dmuPoints.filter((d) => d.efficiency < 99.9);
+
+    // Create surface data for the efficient frontier
+    // Using a simplified approach: create a plane through efficient DMUs
+    if (efficientDMUs.length >= 3) {
+      const minInput = Math.min(...dmuPoints.map((d) => d.inputSum));
+      const maxInput = Math.max(...dmuPoints.map((d) => d.inputSum));
+      const minOutput = Math.min(...dmuPoints.map((d) => d.outputSum));
+      const maxOutput = Math.max(...dmuPoints.map((d) => d.outputSum));
+
+      // Create a grid for the surface
+      const gridSize = 20;
+      const xGrid = [];
+      const yGrid = [];
+      const zGrid = [];
+
+      for (let i = 0; i < gridSize; i++) {
+        const xRow = [];
+        const yRow = [];
+        const zRow = [];
+        for (let j = 0; j < gridSize; j++) {
+          const x = minInput + (maxInput - minInput) * (i / (gridSize - 1));
+          const y = minOutput + (maxOutput - minOutput) * (j / (gridSize - 1));
+
+          // Calculate efficiency at this point (simplified)
+          // Find the closest efficient DMUs and interpolate
+          let z = 0;
+          if (efficientDMUs.length > 0) {
+            const distances = efficientDMUs.map((dmu) => ({
+              dmu,
+              dist: Math.sqrt(
+                Math.pow(dmu.inputSum - x, 2) + Math.pow(dmu.outputSum - y, 2)
+              ),
+            }));
+            distances.sort((a, b) => a.dist - b.dist);
+
+            // Use weighted average of nearest efficient DMUs
+            const nearest = distances.slice(0, 3);
+            const totalWeight = nearest.reduce(
+              (sum, n) => sum + 1 / (n.dist + 0.01),
+              0
+            );
+            z =
+              nearest.reduce(
+                (sum, n) => sum + n.dmu.efficiency * (1 / (n.dist + 0.01)),
+                0
+              ) / totalWeight;
+
+            // Adjust surface to be at or below efficient DMUs
+            if (
+              y / x <
+              Math.max(...efficientDMUs.map((d) => d.outputSum / d.inputSum))
+            ) {
+              z = Math.min(z, 100);
+            } else {
+              z = Math.min(z, 90);
+            }
+          }
+
+          xRow.push(x);
+          yRow.push(y);
+          zRow.push(z);
+        }
+        xGrid.push(xRow);
+        yGrid.push(yRow);
+        zGrid.push(zRow);
+      }
+
+      return {
+        surface: { x: xGrid, y: yGrid, z: zGrid },
+        efficientDMUs,
+        inefficientDMUs,
+        dmuPoints,
+      };
+    }
+
+    return { dmuPoints, efficientDMUs, inefficientDMUs };
+  }, [deaResults, selectedInputs, selectedOutputs]);
+
+  const europeanCountries = [
+    "Austria",
+    "Belgium",
+    "Bulgaria",
+    "Croatia",
+    "Czech Republic",
+    "Denmark",
+    "Estonia",
+    "Finland",
+    "France",
+    "Germany",
+    "Greece",
+    "Hungary",
+    "Ireland",
+    "Italy",
+    "Latvia",
+    "Lithuania",
+    "Luxembourg",
+    "Malta",
+    "Netherlands",
+    "Poland",
+    "Portugal",
+    "Romania",
+    "Slovakia",
+    "Slovenia",
+    "Spain",
+    "Sweden",
+  ];
+
+  useEffect(() => {
+    // Initialize with all European countries selected
+    setSelectedCountries(europeanCountries);
+
+    // Fetch MedeMap data if not already loaded
+    if (!medeMapState.data || Object.keys(medeMapState.data).length === 0) {
+      logger.info("Fetching MedeMap data for DEA...");
+      dispatch(fetchMedeMapData());
+    }
+  }, [dispatch, medeMapState.data]);
+
+  // Note: Removed auto-rerun effect to prevent infinite loops
+  // Analysis will only run when user clicks the button or AI API triggers it
+
+  // Get available indicators from the data
+  const getAvailableIndicators = () => {
+    const indicators: any[] = [];
+
+    if (medeMapState.columnOptions) {
+      Object.entries(medeMapState.columnOptions).forEach(
+        ([tableName, columns]) => {
+          if (Array.isArray(columns)) {
+            columns.forEach((col: any) => {
+              if (!["year", "country"].includes(col.value)) {
+                indicators.push({
+                  value: `${tableName}.${col.value}`,
+                  label: col.label || col.value,
+                  table: tableName,
+                  thresholds: col.thresholds, // Include full metadata for label formatting
+                  meta: col.thresholds, // Alias for compatibility
+                });
+              }
+            });
+          }
+        }
+      );
+    }
+
+    return indicators;
+  };
+
+  const availableIndicators = getAvailableIndicators();
+
+  // Calculate DEA using CCR or BCC model
+  const calculateDEA = () => {
+    setLoading(true);
+    setError(null);
+
+    logger.info("🔬 Starting DEA Analysis...");
+    logger.info("📊 Selected Countries:", selectedCountries);
+    logger.info("📥 Selected Inputs:", selectedInputs);
+    logger.info("📤 Selected Outputs:", selectedOutputs);
+    logger.info("🗂️ Available Tables:", Object.keys(medeMapState.data || {}));
+
+    try {
+      // Prepare DMUs from selected countries and indicators
+      const dmus: DMU[] = selectedCountries.map((country) => {
+        const inputs: { [key: string]: number } = {};
+        const outputs: { [key: string]: number } = {};
+
+        // Collect input values
+        selectedInputs.forEach((inputKey) => {
+          let table, column;
+          if (inputKey.includes(".")) {
+            // Format: "table.column"
+            [table, column] = inputKey.split(".");
+          } else {
+            // Format: "column" - search across all tables
+            column = inputKey;
+            // Find which table contains this column
+            for (const tableName of Object.keys(medeMapState.data || {})) {
+              const tableData = medeMapState.data?.[tableName];
+              if (
+                tableData &&
+                tableData.length > 0 &&
+                Object.prototype.hasOwnProperty.call(tableData[0], column)
+              ) {
+                table = tableName;
+                break;
+              }
+            }
+          }
+
+          const tableData = medeMapState.data?.[table];
+          if (tableData) {
+            const countryData = tableData.find(
+              (row: any) => row.country === country
+            );
+            if (
+              countryData &&
+              countryData[column] !== null &&
+              countryData[column] !== undefined
+            ) {
+              const value = parseFloat(countryData[column]);
+              if (!isNaN(value)) {
+                inputs[inputKey] = value;
+                logger.info(`✅ ${country} ${inputKey}: ${value}`);
+              } else {
+                logger.warning(
+                  `⚠️  ${country} ${inputKey}: Invalid value "${countryData[column]}"`
+                );
+              }
+            } else {
+              logger.warning(`⚠️  ${country} ${inputKey}: No data found`);
+            }
+          } else {
+            logger.warning(
+              `⚠️  Table "${table}" not found for input "${inputKey}"`
+            );
+          }
+        });
+
+        // Collect output values
+        selectedOutputs.forEach((outputKey) => {
+          let table, column;
+          if (outputKey.includes(".")) {
+            // Format: "table.column"
+            [table, column] = outputKey.split(".");
+          } else {
+            // Format: "column" - search across all tables
+            column = outputKey;
+            // Find which table contains this column
+            for (const tableName of Object.keys(medeMapState.data || {})) {
+              const tableData = medeMapState.data?.[tableName];
+              if (
+                tableData &&
+                tableData.length > 0 &&
+                Object.prototype.hasOwnProperty.call(tableData[0], column)
+              ) {
+                table = tableName;
+                break;
+              }
+            }
+          }
+
+          const tableData = medeMapState.data?.[table];
+          if (tableData) {
+            const countryData = tableData.find(
+              (row: any) => row.country === country
+            );
+            if (
+              countryData &&
+              countryData[column] !== null &&
+              countryData[column] !== undefined
+            ) {
+              const value = parseFloat(countryData[column]);
+              if (!isNaN(value)) {
+                outputs[outputKey] = value;
+                logger.info(`✅ ${country} ${outputKey}: ${value}`);
+              } else {
+                logger.warning(
+                  `⚠️  ${country} ${outputKey}: Invalid value "${countryData[column]}"`
+                );
+              }
+            } else {
+              logger.warning(`⚠️  ${country} ${outputKey}: No data found`);
+            }
+          } else {
+            logger.warning(
+              `⚠️  Table "${table}" not found for output "${outputKey}"`
+            );
+          }
+        });
+
+        return {
+          name: country,
+          inputs,
+          outputs,
+        };
+      });
+
+      // Filter out DMUs with incomplete data
+      const validDmus = dmus.filter((dmu) => {
+        const hasAllInputs = selectedInputs.every(
+          (input) =>
+            Object.prototype.hasOwnProperty.call(dmu.inputs, input) &&
+            !isNaN(dmu.inputs[input]) &&
+            dmu.inputs[input] !== 0
+        );
+        const hasAllOutputs = selectedOutputs.every(
+          (output) =>
+            Object.prototype.hasOwnProperty.call(dmu.outputs, output) &&
+            !isNaN(dmu.outputs[output]) &&
+            dmu.outputs[output] !== 0
+        );
+
+        const isValid = hasAllInputs && hasAllOutputs;
+
+        if (!isValid) {
+          logger.warning(
+            `⚠️  Excluding ${dmu.name} from DEA: missing data (inputs: ${hasAllInputs}, outputs: ${hasAllOutputs})`
+          );
+        }
+
+        return isValid;
+      });
+
+      logger.info(
+        `✅ DEA Analysis: ${validDmus.length} of ${dmus.length} countries have complete data`
+      );
+
+      if (validDmus.length < 2) {
+        throw new Error(
+          `Insufficient data: Only ${validDmus.length} countries have complete data for the selected indicators. At least 2 countries are required.`
+        );
+      }
+
+      // DEA calculation using selected model type and orientation
+      // This is a simplified version - for production, you'd want a proper linear programming solver
+
+      // Debug: Log some key countries to understand the data
+      const debugCountries = [
+        "Bulgaria",
+        "Sweden",
+        "Denmark",
+        "Hungary",
+        "Slovakia",
+      ];
+      debugCountries.forEach((country) => {
+        const countryDmu = validDmus.find((d) => d.name === country);
+        if (countryDmu) {
+          const inSum = Object.values(countryDmu.inputs).reduce(
+            (s, v) => s + v,
+            0
+          );
+          const outSum = Object.values(countryDmu.outputs).reduce(
+            (s, v) => s + v,
+            0
+          );
+          logger.info(
+            `${country}: inputs=${inSum.toFixed(2)}, outputs=${outSum.toFixed(
+              2
+            )}, ratio=${(outSum / inSum).toFixed(3)}`
+          );
+        } else {
+          logger.info(`${country}: NOT IN ANALYSIS (missing data)`);
+        }
+      });
+
+      const results = validDmus.map((dmu, index) => {
+        // Calculate efficiency ratio for each DMU
+        const inputSum = Object.values(dmu.inputs).reduce(
+          (sum, val) => sum + val,
+          0
+        );
+        const outputSum = Object.values(dmu.outputs).reduce(
+          (sum, val) => sum + val,
+          0
+        );
+
+        // Find best practice frontier
+        let maxEfficiency = 0;
+        const peers: string[] = [];
+
+        validDmus.forEach((compareDmu, compareIndex) => {
+          if (compareIndex !== index) {
+            const compareInputSum = Object.values(compareDmu.inputs).reduce(
+              (sum, val) => sum + val,
+              0
+            );
+            const compareOutputSum = Object.values(compareDmu.outputs).reduce(
+              (sum, val) => sum + val,
+              0
+            );
+
+            const efficiency =
+              compareOutputSum / compareInputSum / (outputSum / inputSum);
+            if (efficiency > maxEfficiency) {
+              maxEfficiency = efficiency;
+              peers.push(compareDmu.name);
+            }
+          }
+        });
+
+        // Calculate efficiency based on orientation
+        let efficiency: number;
+
+        if (orientation === "input") {
+          // Input-oriented: how efficiently are inputs being used?
+          // Compare current performance to best practice
+          const currentRatio = outputSum / Math.max(inputSum, 0.0001);
+          const maxRatio = Math.max(
+            ...validDmus.map((d) => {
+              const dInputSum = Object.values(d.inputs).reduce(
+                (sum, val) => sum + val,
+                0
+              );
+              const dOutputSum = Object.values(d.outputs).reduce(
+                (sum, val) => sum + val,
+                0
+              );
+              return dOutputSum / Math.max(dInputSum, 0.0001);
+            })
+          );
+          efficiency = currentRatio / maxRatio;
+        } else {
+          // Output-oriented: how much output potential is being realized?
+          // Find the minimum input needed for this level of output
+          let minInputForThisOutput = inputSum;
+
+          validDmus.forEach((otherDmu) => {
+            const otherInputSum = Object.values(otherDmu.inputs).reduce(
+              (sum, val) => sum + val,
+              0
+            );
+            const otherOutputSum = Object.values(otherDmu.outputs).reduce(
+              (sum, val) => sum + val,
+              0
+            );
+
+            // If other DMU produces at least as much output with fewer inputs
+            if (
+              otherOutputSum >= outputSum &&
+              otherInputSum < minInputForThisOutput
+            ) {
+              minInputForThisOutput = otherInputSum;
+            }
+          });
+
+          // Efficiency = minimum inputs needed / actual inputs used
+          efficiency = minInputForThisOutput / Math.max(inputSum, 0.0001);
+        }
+
+        // Apply model type adjustment
+        if (modelType === "BCC") {
+          // BCC model allows for variable returns to scale (VRS)
+          // Apply a small adjustment to account for scale effects
+          efficiency = Math.min(1, efficiency * 1.05);
+        }
+
+        return {
+          ...dmu,
+          efficiency: parseFloat((efficiency * 100).toFixed(2)),
+          peers: efficiency === 1 ? ["Self"] : peers.slice(0, 3),
+          slack: {}, // Would calculate input/output slacks in full implementation
+        };
+      });
+
+      setDeaResults(results);
+      setDmuData(validDmus);
+    } catch (err) {
+      setError("Error calculating DEA: " + (err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // AI API Integration: Listen to view-specific configuration events (placed after calculateDEA)
+  useEffect(() => {
+    const handleDeaConfigUpdate = (event: CustomEvent) => {
+      logger.info("DEA: AI API configuration received:", event.detail);
+      const config = event.detail;
+
+      // Batch all state updates to prevent cascading effects
+      React.startTransition(() => {
+        if (config.inputs) setSelectedInputs(config.inputs);
+        if (config.outputs) setSelectedOutputs(config.outputs);
+        if (config.modelType) setModelType(config.modelType);
+        if (config.orientation) setOrientation(config.orientation);
+        if (config.countries) setSelectedCountries(config.countries);
+      });
+    };
+
+    const handleDeaRunAnalysis = () => {
+      logger.info("DEA: AI API triggered analysis run");
+      // Auto-run analysis if we have required inputs
+      if (
+        selectedInputs.length > 0 &&
+        selectedOutputs.length > 0 &&
+        selectedCountries.length > 0
+      ) {
+        calculateDEA();
+      }
+    };
+
+    // Add event listeners
+    window.addEventListener(
+      "deaConfigUpdated",
+      handleDeaConfigUpdate as EventListener
+    );
+    window.addEventListener("deaRunAnalysis", handleDeaRunAnalysis);
+
+    // Check for initial AI configuration from localStorage
+    const savedConfig = localStorage.getItem("deaAIConfig");
+    if (savedConfig) {
+      try {
+        const config = JSON.parse(savedConfig);
+        // Only apply if it's recent (within last 5 minutes)
+        const configTime = new Date(config.timestamp);
+        const now = new Date();
+        if (now.getTime() - configTime.getTime() < 5 * 60 * 1000) {
+          handleDeaConfigUpdate({ detail: config } as CustomEvent);
+        }
+      } catch (e) {
+        logger.warning("Failed to parse DEA AI config:", e);
+      }
+    }
+
+    return () => {
+      window.removeEventListener(
+        "deaConfigUpdated",
+        handleDeaConfigUpdate as EventListener
+      );
+      window.removeEventListener("deaRunAnalysis", handleDeaRunAnalysis);
+    };
+  }, [selectedInputs, selectedOutputs, selectedCountries]);
+
+  const handleInputChange = (value: string[]) => {
+    setSelectedInputs(value);
+  };
+
+  const handleOutputChange = (value: string[]) => {
+    setSelectedOutputs(value);
+  };
+
+  const handleCountryChange = (value: string[]) => {
+    setSelectedCountries(value);
+  };
+
+  const exportResults = () => {
+    if (deaResults.length === 0) return;
+
+    const csv = [
+      [
+        "Country",
+        "Efficiency Score (%)",
+        "Peers",
+        ...selectedInputs,
+        ...selectedOutputs,
+      ],
+      ...deaResults.map((result) => [
+        result.name,
+        result.efficiency,
+        result.peers?.join("; "),
+        ...selectedInputs.map((key) => result.inputs[key]),
+        ...selectedOutputs.map((key) => result.outputs[key]),
+      ]),
+    ]
+      .map((row) => row.join(","))
+      .join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "dea_results.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <Container maxWidth="xl" className={styles.container}>
+      <Paper elevation={3} className={styles.header}>
+        <Typography variant="h4" gutterBottom>
+          Data Envelopment Analysis (DEA)
+        </Typography>
+        <Typography variant="body2" color="textSecondary">
+          Measure the relative efficiency of Decision Making Units (DMUs) using
+          multiple inputs and outputs
+        </Typography>
+      </Paper>
+
+      <Grid container spacing={3}>
+        {/* Configuration Panel */}
+        <Grid item xs={12} md={4}>
+          <Paper className={styles.configPanel}>
+            <Typography variant="h6" gutterBottom>
+              DEA Configuration
+            </Typography>
+
+            <FormControl fullWidth margin="normal">
+              <InputLabel>Model Type</InputLabel>
+              <Select
+                value={modelType}
+                onChange={(e) => setModelType(e.target.value as "CCR" | "BCC")}
+              >
+                <MenuItem value="CCR">CCR (Constant Returns to Scale)</MenuItem>
+                <MenuItem value="BCC">BCC (Variable Returns to Scale)</MenuItem>
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth margin="normal">
+              <InputLabel>Orientation</InputLabel>
+              <Select
+                value={orientation}
+                onChange={(e) =>
+                  setOrientation(e.target.value as "input" | "output")
+                }
+              >
+                <MenuItem value="input">Input-Oriented</MenuItem>
+                <MenuItem value="output">Output-Oriented</MenuItem>
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth margin="normal">
+              <InputLabel>Select Countries (DMUs)</InputLabel>
+              <Select
+                multiple
+                value={selectedCountries}
+                onChange={(e) =>
+                  handleCountryChange(e.target.value as string[])
+                }
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {(selected as string[]).map((value) => (
+                      <Chip key={value} label={value} size="small" />
+                    ))}
+                  </Box>
+                )}
+              >
+                {europeanCountries.map((country) => (
+                  <MenuItem key={country} value={country}>
+                    {country}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth margin="normal">
+              <InputLabel>Input Variables</InputLabel>
+              <Select
+                multiple
+                value={selectedInputs}
+                onChange={(e) => handleInputChange(e.target.value as string[])}
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {(selected as string[]).map((value) => (
+                      <Chip
+                        key={value}
+                        label={
+                          availableIndicators.find((i) => i.value === value)
+                            ?.label || value
+                        }
+                        size="small"
+                        color="primary"
+                      />
+                    ))}
+                  </Box>
+                )}
+              >
+                {availableIndicators.map((indicator) => (
+                  <MenuItem key={indicator.value} value={indicator.value}>
+                    <Typography variant="body2">
+                      {formatIndicatorLabel(labelDisplayMode, indicator)}
+                      <Typography
+                        variant="caption"
+                        color="textSecondary"
+                        component="span"
+                      >
+                        {" "}
+                        ({indicator.table})
+                      </Typography>
+                    </Typography>
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            <FormControl fullWidth margin="normal">
+              <InputLabel>Output Variables</InputLabel>
+              <Select
+                multiple
+                value={selectedOutputs}
+                onChange={(e) => handleOutputChange(e.target.value as string[])}
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {(selected as string[]).map((value) => (
+                      <Chip
+                        key={value}
+                        label={
+                          availableIndicators.find((i) => i.value === value)
+                            ?.label || value
+                        }
+                        size="small"
+                        color="secondary"
+                      />
+                    ))}
+                  </Box>
+                )}
+              >
+                {availableIndicators.map((indicator) => (
+                  <MenuItem key={indicator.value} value={indicator.value}>
+                    <Typography variant="body2">
+                      {formatIndicatorLabel(labelDisplayMode, indicator)}
+                      <Typography
+                        variant="caption"
+                        color="textSecondary"
+                        component="span"
+                      >
+                        {" "}
+                        ({indicator.table})
+                      </Typography>
+                    </Typography>
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            <Button
+              variant="contained"
+              color="primary"
+              fullWidth
+              onClick={calculateDEA}
+              disabled={
+                loading ||
+                selectedInputs.length === 0 ||
+                selectedOutputs.length === 0 ||
+                selectedCountries.length === 0
+              }
+              sx={{ mt: 2 }}
+            >
+              {loading ? <CircularProgress size={24} /> : "Calculate DEA"}
+            </Button>
+
+            <Button
+              variant="outlined"
+              color="secondary"
+              fullWidth
+              onClick={() => {
+                setSelectedInputs([]);
+                setSelectedOutputs([]);
+                setDeaResults([]);
+                setDmuData([]);
+                setError(null);
+              }}
+              disabled={
+                loading ||
+                (selectedInputs.length === 0 && selectedOutputs.length === 0)
+              }
+              sx={{ mt: 1 }}
+            >
+              Clear Variable Selections
+            </Button>
+
+            {error && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {error}
+              </Alert>
+            )}
+          </Paper>
+        </Grid>
+
+        {/* Results Panel */}
+        <Grid item xs={12} md={8}>
+          <Paper className={styles.resultsPanel}>
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                mb: 2,
+              }}
+            >
+              <Typography variant="h6">Analysis Results</Typography>
+              {deaResults.length > 0 && (
+                <Button
+                  startIcon={<DownloadIcon />}
+                  onClick={exportResults}
+                  variant="outlined"
+                  size="small"
+                >
+                  Export CSV
+                </Button>
+              )}
+            </Box>
+
+            {deaResults.length > 0 && (
+              <Tabs
+                value={activeTab}
+                onChange={(_, newValue) => setActiveTab(newValue)}
+              >
+                <Tab label="Efficiency Scores" />
+                <Tab label="Ranking Chart" />
+                <Tab label="Frontier Analysis" />
+                <Tab label="3D Efficiency Frontier" />
+                <Tab label="Detailed Table" />
+              </Tabs>
+            )}
+
+            <Box sx={{ mt: 2 }}>
+              {deaResults.length === 0 ? (
+                <Box className={styles.emptyState}>
+                  <Typography color="textSecondary">
+                    Configure inputs and outputs, then click "Calculate DEA" to
+                    see results
+                  </Typography>
+                </Box>
+              ) : (
+                <>
+                  {activeTab === 0 && (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <BarChart
+                        data={deaResults.sort(
+                          (a, b) => b.efficiency! - a.efficiency!
+                        )}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="name"
+                          angle={-45}
+                          textAnchor="end"
+                          height={80}
+                        />
+                        <YAxis
+                          label={{
+                            value: "Efficiency (%)",
+                            angle: -90,
+                            position: "insideLeft",
+                          }}
+                        />
+                        <RechartsTooltip />
+                        <Legend />
+                        <Bar
+                          dataKey="efficiency"
+                          fill="#8884d8"
+                          name="Efficiency Score"
+                          label={{ position: "top" }}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+
+                  {activeTab === 1 && (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <RadarChart data={deaResults}>
+                        <PolarGrid />
+                        <PolarAngleAxis dataKey="name" />
+                        <PolarRadiusAxis angle={90} domain={[0, 100]} />
+                        <Radar
+                          name="Efficiency"
+                          dataKey="efficiency"
+                          stroke="#8884d8"
+                          fill="#8884d8"
+                          fillOpacity={0.6}
+                        />
+                        <RechartsTooltip />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  )}
+
+                  {activeTab === 2 && (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <ScatterChart>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="inputSum"
+                          name="Input Sum"
+                          label={{
+                            value: "Total Inputs",
+                            position: "insideBottom",
+                            offset: -5,
+                          }}
+                        />
+                        <YAxis
+                          dataKey="outputSum"
+                          name="Output Sum"
+                          label={{
+                            value: "Total Outputs",
+                            angle: -90,
+                            position: "insideLeft",
+                          }}
+                        />
+                        <RechartsTooltip cursor={{ strokeDasharray: "3 3" }} />
+                        <Scatter
+                          name="DMUs"
+                          data={deaResults.map((r) => ({
+                            ...r,
+                            inputSum: Object.values(r.inputs).reduce(
+                              (sum, val) => sum + val,
+                              0
+                            ),
+                            outputSum: Object.values(r.outputs).reduce(
+                              (sum, val) => sum + val,
+                              0
+                            ),
+                          }))}
+                          fill="#8884d8"
+                        />
+                      </ScatterChart>
+                    </ResponsiveContainer>
+                  )}
+
+                  {activeTab === 3 &&
+                    (() => {
+                      if (!plot3DData) {
+                        return (
+                          <Typography>
+                            Not enough data for 3D visualization
+                          </Typography>
+                        );
+                      }
+
+                      const traces = [];
+
+                      // Add surface for efficiency frontier
+                      if (plot3DData.surface) {
+                        traces.push({
+                          type: "surface",
+                          x: plot3DData.surface.x,
+                          y: plot3DData.surface.y,
+                          z: plot3DData.surface.z,
+                          colorscale: "Viridis",
+                          opacity: 0.7,
+                          showscale: false,
+                          name: "Efficiency Frontier",
+                          hovertemplate:
+                            "Input: %{x:.2f}<br>Output: %{y:.2f}<br>Efficiency: %{z:.1f}%",
+                        });
+                      }
+
+                      // Add scatter points for all DMUs
+                      traces.push({
+                        type: "scatter3d",
+                        mode: "markers+text",
+                        x: plot3DData.dmuPoints.map((d) => d.inputSum),
+                        y: plot3DData.dmuPoints.map((d) => d.outputSum),
+                        z: plot3DData.dmuPoints.map((d) => d.efficiency),
+                        text: plot3DData.dmuPoints.map((d) => d.name),
+                        textposition: "top center",
+                        marker: {
+                          size: 8,
+                          color: plot3DData.dmuPoints.map((d) => d.efficiency),
+                          colorscale: [
+                            [0, "rgb(255,0,0)"], // Red at 0%
+                            [0.5, "rgb(255,255,0)"], // Yellow at 50%
+                            [0.75, "rgb(0,150,255)"], // Light blue at 75%
+                            [1, "rgb(0,0,139)"], // Dark blue at 100%
+                          ],
+                          cmin: 0,
+                          cmax: 100,
+                          colorbar: {
+                            title: "Efficiency %",
+                            thickness: 20,
+                            len: 0.5,
+                          },
+                          line: {
+                            color: "black",
+                            width: 0.5,
+                          },
+                        },
+                        name: "DMUs",
+                        hovertemplate:
+                          "%{text}<br>Total Input: %{x:.2f}<br>Total Output: %{y:.2f}<br>Efficiency: %{z:.1f}%",
+                      });
+
+                      // Add projection lines from inefficient DMUs to the frontier
+                      if (plot3DData.inefficientDMUs) {
+                        plot3DData.inefficientDMUs.forEach((dmu) => {
+                          traces.push({
+                            type: "scatter3d",
+                            mode: "lines",
+                            x: [dmu.inputSum, dmu.inputSum],
+                            y: [dmu.outputSum, dmu.outputSum],
+                            z: [dmu.efficiency, 100],
+                            line: {
+                              color: "red",
+                              width: 2,
+                              dash: "dashdot",
+                            },
+                            opacity: 0.5,
+                            showlegend: false,
+                            hovertemplate: `${dmu.name} gap to frontier: ${(
+                              100 - dmu.efficiency
+                            ).toFixed(1)}%`,
+                          });
+                        });
+                      }
+
+                      const layout = {
+                        title: "3D Efficiency Frontier Visualization",
+                        scene: {
+                          xaxis: {
+                            title: "Total Inputs",
+                            backgroundcolor: "rgb(230, 230, 230)",
+                            gridcolor: "rgb(255, 255, 255)",
+                            showbackground: true,
+                          },
+                          yaxis: {
+                            title: "Total Outputs",
+                            backgroundcolor: "rgb(230, 230, 230)",
+                            gridcolor: "rgb(255, 255, 255)",
+                            showbackground: true,
+                          },
+                          zaxis: {
+                            title: "Efficiency (%)",
+                            backgroundcolor: "rgb(230, 230, 230)",
+                            gridcolor: "rgb(255, 255, 255)",
+                            showbackground: true,
+                            range: [0, 105],
+                          },
+                          camera: {
+                            eye: { x: 1.5, y: 1.5, z: 1.5 },
+                            center: { x: 0, y: 0, z: 0 },
+                          },
+                        },
+                        autosize: true,
+                        height: 500,
+                        margin: { l: 0, r: 0, b: 0, t: 40 },
+                      };
+
+                      return (
+                        <Box sx={{ width: "100%", height: 500 }}>
+                          <Plot
+                            data={traces}
+                            layout={layout}
+                            config={{
+                              displayModeBar: true,
+                              displaylogo: false,
+                            }}
+                            style={{ width: "100%", height: "100%" }}
+                          />
+                        </Box>
+                      );
+                    })()}
+
+                  {activeTab === 4 && (
+                    <TableContainer>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Country</TableCell>
+                            <TableCell align="right">Efficiency (%)</TableCell>
+                            <TableCell>Status</TableCell>
+                            <TableCell>Reference Set</TableCell>
+                            {selectedInputs.map((input) => {
+                              const indicator = availableIndicators.find(
+                                (i) => i.value === input
+                              );
+                              return (
+                                <TableCell key={input} align="right">
+                                  {formatIndicatorLabel(
+                                    labelDisplayMode,
+                                    indicator || { value: input }
+                                  )}
+                                </TableCell>
+                              );
+                            })}
+                            {selectedOutputs.map((output) => {
+                              const indicator = availableIndicators.find(
+                                (i) => i.value === output
+                              );
+                              return (
+                                <TableCell key={output} align="right">
+                                  {formatIndicatorLabel(
+                                    labelDisplayMode,
+                                    indicator || { value: output }
+                                  )}
+                                </TableCell>
+                              );
+                            })}
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {deaResults
+                            .sort((a, b) => b.efficiency! - a.efficiency!)
+                            .map((result) => (
+                              <TableRow key={result.name}>
+                                <TableCell>{result.name}</TableCell>
+                                <TableCell align="right">
+                                  <Chip
+                                    label={`${result.efficiency}%`}
+                                    size="small"
+                                    color={
+                                      result.efficiency === 100
+                                        ? "success"
+                                        : "default"
+                                    }
+                                  />
+                                </TableCell>
+                                <TableCell>
+                                  {result.efficiency === 100 ? (
+                                    <Typography
+                                      color="success.main"
+                                      variant="body2"
+                                    >
+                                      Efficient
+                                    </Typography>
+                                  ) : (
+                                    <Typography
+                                      color="warning.main"
+                                      variant="body2"
+                                    >
+                                      Inefficient
+                                    </Typography>
+                                  )}
+                                </TableCell>
+                                <TableCell>
+                                  {result.peers?.join(", ") || "-"}
+                                </TableCell>
+                                {selectedInputs.map((input) => (
+                                  <TableCell key={input} align="right">
+                                    {result.inputs[input]?.toFixed(2)}
+                                  </TableCell>
+                                ))}
+                                {selectedOutputs.map((output) => (
+                                  <TableCell key={output} align="right">
+                                    {result.outputs[output]?.toFixed(2)}
+                                  </TableCell>
+                                ))}
+                              </TableRow>
+                            ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
+                </>
+              )}
+            </Box>
+          </Paper>
+        </Grid>
+      </Grid>
+
+      {/* Information Panel */}
+      <Paper className={styles.infoPanel}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+          <InfoIcon color="info" />
+          <Typography variant="h6">About Data Envelopment Analysis</Typography>
+        </Box>
+        <Typography variant="body2" color="textSecondary">
+          DEA is a non-parametric method for measuring the efficiency of
+          decision-making units (DMUs) with multiple inputs and outputs. The
+          efficiency score ranges from 0% to 100%, where 100% indicates that the
+          DMU is on the efficiency frontier. This implementation uses the{" "}
+          {modelType} model with {orientation} orientation to evaluate the
+          relative efficiency of European countries based on selected media and
+          democracy indicators.
+        </Typography>
+      </Paper>
+    </Container>
+  );
+};
+
+export default DEAAnalysisView;

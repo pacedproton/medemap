@@ -1,0 +1,26 @@
+# Argo CD Application: "keep namespace `medemap` equal to openshift/ in the medemap repo".
+# Created once with `oc apply -f argocd/medemap.yaml`; after that pushes to the branch deploy themselves.
+#
+# Prerequisite (one-time, cluster-scoped, so done by hand):
+#   oc create namespace medemap
+#   oc label namespace medemap argocd.argoproj.io/managed-by=openshift-gitops
+#
+# Private repo: credentials come from the repo-creds Secret in openshift-gitops (url prefix https://github.com/pacedproton).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: medemap
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/pacedproton/medemap.git
+    targetRevision: main
+    path: openshift
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: medemap
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

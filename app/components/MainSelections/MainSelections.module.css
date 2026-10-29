@@ -1,0 +1,112 @@
+.dataSelectionTitle {
+        margin-bottom: 16px;
+      }
+      
+      .selectBox {
+        width: 100%;
+      }
+      
+      .submitButton {
+        margin-top: 16px;
+      }
+      
+      .selectedOptions {
+        margin-top: 24px;
+      }
+      
+      .paperContainer {
+        padding: 1rem;
+      }
+      
+      .loadingBox {
+        margin-bottom: 16px;
+      }
+      
+      .feedbackText {
+        margin-top: 1rem;
+      }
+      
+      .selectedOptionsContainer {
+        max-width: 800px;
+        margin: 16px auto 0;
+      }
+      
+      .selectedOptionsTitle {
+        text-align: center;
+        margin-bottom: 16px;
+      }
+      
+      .selectedOptionsPaper {
+        padding: 16px;
+        height: 100%;
+      }
+      
+      .selectedOptionsChip {
+        max-width: 100%;
+        height: auto;
+      }
+      
+      .selectedOptionsChipLabel {
+        white-space: normal;
+        padding: 4px 24px 4px 12px;
+      }
+      
+      .selectedOptionsChipDeleteIcon {
+        position: absolute;
+        right: 5px;
+      }
+      
+      .clearSelectionsButton {
+        margin-top: 16px;
+      }
+      
+      .modalContent {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 400px;
+        background-color: #e3f2fd;
+        border: 2px solid #1976d2;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        padding: 32px;
+        border-radius: 8px;
+      }
+      
+      .modalTitle {
+        color: #1976d2;
+        margin-bottom: 16px;
+      }
+      
+      .modalDescription {
+        color: #333;
+        margin-top: 16px;
+      }
+      
+      .modalCloseButton {
+        margin-top: 16px;
+        background-color: #1976d2;
+        color: white;
+      }
+      
+      .modalCloseButton:hover {
+        background-color: #1565c0;
+      }
+      
+      .chartContainer {
+        margin-bottom: 120px;  /* Adds space below each chart */
+      }
+      
+      .chartTitlePaper {
+        margin-bottom: 20px;  /* Adds space below the chart title paper */
+        padding: 15px 25px;
+        background-color: #f0f8ff !important;  /* Light blue background */
+        border-left: 5px solid #1976d2;  /* Blue left border */
+      }
+      
+      .chartTitle {
+        color: #1976d2;  /* Blue text color */
+        font-weight: 600 !important;
+        text-transform: capitalize;
+        letter-spacing: 0.5px;
+      }

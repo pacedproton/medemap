@@ -1,0 +1,57 @@
+# Democracy & Participation Focus Profile
+# This profile shows a curated view of democracy-related indicators
+
+profile:
+  # Unique identifier (used in URLs and permissions)
+  id: democracy-focus
+
+  # Display name in UI
+  name: "Democracy & Participation"
+
+  # Description for profile selector
+
+  # Material-UI icon name
+  icon: "how_to_vote"
+
+  # Primary color for UI elements
+  color: "#1976d2"
+
+  # Public profiles are visible to all authenticated users
+  # Private profiles require explicit permission in allowed_profiles
+  public: false
+
+  # Include these table groups (from your config)
+  groups:
+    - democracy
+    - demand_side_trust_in_media
+
+  # Include specific tables by their DB name
+  tables:
+    - basic_data  # Always include basic country data
+
+  # Include specific indicators (column names)
+  # Leave empty to include all columns from selected tables
+  indicators: []
+
+  # Exclude specific items even if included by groups
+  exclude:
+    tables: []
+    indicators: []
+
+  # Default view settings when profile is activated
+  defaults:
+    view: "map"  # map, 3d, chart, table
+    chartType: "bar"
+    timeRange: "2020-2024"
+    countries: "european"  # or "all" or specific list
+
+  # Metadata
+  metadata:
+    author: "MeDeMAP Team"
+    created: "2024-01-15"
+    updated: "2024-03-10"
+    version: "1.0"
+    tags:
+      - democracy
+      - participation
+      - civic-engagement

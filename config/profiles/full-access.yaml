@@ -1,0 +1,47 @@
+# Full Access Profile
+# Complete dataset access for researchers and admins
+
+profile:
+  id: full-access
+  name: "Full Dataset Access"
+  description: "Unrestricted access to all MeDeMAP indicators and data"
+  icon: "database"
+  color: "#2e7d32"
+  public: false  # Requires explicit permission
+
+  # Include all groups
+  groups:
+    - demand_side_trust_in_media
+    - basic_data
+    - demand_side_media_use
+    - democracy
+    - legal_framework_equality
+    - legal_framework_freedom
+    - legal_framework_human_dignity
+    - legal_framework_pluralism
+    - legal_framework_rule_of_law
+    - supply_side
+
+  tables: []  # Empty means use groups only
+
+  indicators: []  # Empty means all indicators
+
+  exclude:
+    tables: []
+    indicators: []
+
+  defaults:
+    view: "table"
+    chartType: "bar"
+    timeRange: "all"
+    countries: "all"
+
+  metadata:
+    author: "MeDeMAP Team"
+    created: "2024-01-10"
+    updated: "2024-03-10"
+    version: "1.0"
+    tags:
+      - complete
+      - research
+      - full-access

@@ -1,0 +1,15 @@
+# Database `medemap` on the shared CloudNativePG cluster `pg` (namespace postgres).
+# Not synced by Argo (lives in a subfolder, and in another namespace). Apply by hand, after the
+# role exists (openshift/create-secrets.sh creates it):  oc apply -f openshift/db/medemap-database.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: medemap
+  namespace: postgres
+spec:
+  cluster:
+    name: pg
+  name: medemap
+  owner: medemap
+  ensure: present
+  databaseReclaimPolicy: retain

@@ -1,0 +1,191 @@
+# MeDeMAP web app (Next.js) -- one OpenShift project, synced by Argo CD (argocd/medemap.yaml).
+#
+# Reached through the shared Cloudflare tunnel; no Route/Ingress. In the Cloudflare dashboard
+# (Zero Trust -> Networks -> Tunnels -> ocp-tunnel -> Published application routes) the hostname
+# medemap.cmclab.science must point at this Service:
+#     http://medemap-web.medemap.svc:80
+#
+# Secrets are not in git: openshift/create-secrets.sh creates the Secret `medemap-env`.
+# Database: shared CloudNativePG cluster `pg` (namespace postgres), see openshift/db/.
+# Image:  built on `one`, pushed to the internal registry as medemap/web:latest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medemap-web
+  namespace: medemap
+  labels:
+    app: medemap-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: medemap-web
+  template:
+    metadata:
+      labels:
+        app: medemap-web
+    spec:
+      # the app never talks to the Kubernetes API, so it gets no token to steal
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: medemap-web
+          image: image-registry.openshift-image-registry.svc:5000/medemap/web:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: AUTH_TRUST_HOST
+              value: "true"
+            - name: NEXTAUTH_URL
+              value: https://medemap.cmclab.science
+            - name: AUTH_URL
+              value: https://medemap.cmclab.science
+            - name: POSTGRES_HOST
+              value: pg-rw.postgres.svc
+            - name: DB_HOST
+              value: pg-rw.postgres.svc
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: medemap
+            - name: DB_NAME
+              value: medemap
+          envFrom:
+            - secretRef:
+                name: medemap-env
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # with a read-only root, these are the only places the app may write
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: next-cache
+              mountPath: /app/.next/cache
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /api/health?probe=startup
+              port: 3000
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health?probe=readiness
+              port: 3000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health?probe=liveness
+              port: 3000
+            periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: next-cache
+          emptyDir:
+            sizeLimit: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: medemap-web
+  namespace: medemap
+  labels:
+    app: medemap-web
+spec:
+  selector:
+    app: medemap-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+
+---
+# Only the Cloudflare tunnel may reach the app; the app may reach only DNS, the shared
+# Postgres, the LLM APIs on 443 and Ollama on 11434. Everything else in the cluster
+# (other projects, the Kubernetes API, the registry) is unreachable from this pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: medemap-web
+  namespace: medemap
+spec:
+  podSelector:
+    matchLabels:
+      app: medemap-web
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflared
+          podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: postgres
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg
+      ports:
+        - { protocol: TCP, port: 5432 }
+    # OpenAI / Anthropic: any public address on 443, never a private or link-local one
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }
+    # Ollama on a private address; the cluster's own ranges stay excluded
+    - to:
+        - ipBlock:
+            cidr: 100.64.0.0/10
+        - ipBlock:
+            cidr: 192.168.0.0/16
+        - ipBlock:
+            cidr: 172.16.0.0/12
+            except: [172.30.0.0/16]
+        - ipBlock:
+            cidr: 10.0.0.0/8
+            except: [10.128.0.0/14]
+      ports:
+        - { protocol: TCP, port: 11434 }

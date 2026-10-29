@@ -1,0 +1,387 @@
+/**
+ * YAML Configuration Loader for LLM Service
+ *
+ * Loads LLM provider configurations from YAML files
+ */
+
+import { LLMConfig } from '../types';
+import { logger } from '../../../logging/logger';
+import { LLMConfigStore } from '../LLMConfigManager';
+
+// Simple YAML parser (for basic configs - could use js-yaml for complex ones)
+class SimpleYamlParser {
+  static parse(yamlContent: string): any {
+    const lines = yamlContent.split('\n');
+    const result: any = {};
+    const stack: Array<{ obj: any; indent: number }> = [{ obj: result, indent: -1 }];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      // Skip empty lines and comments
+      if (!trimmed || trimmed.startsWith('#')) continue;
+
+      const indent = line.length - line.trimLeft().length;
+      const colonIndex = trimmed.indexOf(':');
+
+      if (colonIndex === -1) continue;
+
+      const key = trimmed.substring(0, colonIndex).trim();
+      const value = trimmed.substring(colonIndex + 1).trim();
+
+      // Find the right parent object based on indentation
+      while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
+        stack.pop();
+      }
+
+      const parent = stack[stack.length - 1].obj;
+
+      if (value === '' || value === '{}' || value === '[]') {
+        // This is a parent key
+        parent[key] = value === '[]' ? [] : {};
+        stack.push({ obj: parent[key], indent });
+      } else {
+        // This is a value
+        parent[key] = this.parseValue(value);
+      }
+    }
+
+    return result;
+  }
+
+  private static parseValue(value: string): any {
+    // Handle different value types
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    if (value === 'null') return null;
+    if (value.startsWith('"') && value.endsWith('"')) {
+      return value.slice(1, -1);
+    }
+    if (value.startsWith("'") && value.endsWith("'")) {
+      return value.slice(1, -1);
+    }
+    if (/^\d+$/.test(value)) return parseInt(value);
+    if (/^\d+\.\d+$/.test(value)) return parseFloat(value);
+    if (value.startsWith('[') && value.endsWith(']')) {
+      const items = value.slice(1, -1).split(',').map(item => item.trim());
+      return items.map(item => this.parseValue(item));
+    }
+    return value;
+  }
+}
+
+export interface YamlLLMConfig {
+  llm: {
+    primary: {
+      provider: string;
+      model: string;
+      baseUrl?: string;
+      apiKey?: string;
+      temperature?: number;
+      maxTokens?: number;
+      timeout?: number;
+    };
+    fallbacks?: Array<{
+      provider: string;
+      model: string;
+      baseUrl?: string;
+      apiKey?: string;
+      temperature?: number;
+      maxTokens?: number;
+      timeout?: number;
+    }>;
+    preferences?: {
+      autoFallback?: boolean;
+      cacheResponses?: boolean;
+      timeoutMs?: number;
+    };
+  };
+}
+
+export class YamlConfigLoader {
+  static async loadFromFile(filePath: string): Promise<LLMConfigStore | null> {
+    try {
+      // In browser environment, try to fetch the file from public directory
+      if (typeof window !== 'undefined') {
+        try {
+          // Build the full URL based on the current location
+          const baseUrl = window.location.origin;
+          const url = `${baseUrl}/${filePath}`;
+          logger.info(`Attempting to fetch YAML config from ${url}`, { component: "YamlConfigLoader" });
+
+          const response = await fetch(url);
+
+          if (response.ok) {
+            const content = await response.text();
+            logger.info(`Successfully fetched YAML config, parsing...`, { component: "YamlConfigLoader" });
+            const config = this.loadFromString(content);
+            if (config) {
+              logger.info(`Successfully parsed YAML config`, { component: "YamlConfigLoader", timeout: config.primary?.timeout });
+            }
+            return config;
+          } else if (response.status === 404) {
+            // File doesn't exist, silently return null
+            logger.info(`Config file ${filePath} not found (404), will use defaults`);
+          } else {
+            logger.warning(`Failed to fetch ${url}: ${response.status} ${response.statusText}`, { component: "YamlConfigLoader" });
+          }
+        } catch (fetchError) {
+          logger.warning(`Could not fetch config file`, { component: "YamlConfigLoader", filePath, errorMessage: (fetchError as Error).message });
+        }
+        return null;
+      }
+
+      // Server-side only - this code won't be bundled for browser
+      logger.warning('File system access not available in browser environment', { component: 'YamlConfigLoader' });
+      return null;
+    } catch (error) {
+      logger.error('Failed to load YAML config from file', { component: 'YamlConfigLoader', error });
+      return null;
+    }
+  }
+
+  static loadFromString(yamlContent: string): LLMConfigStore | null {
+    try {
+      logger.info('Parsing YAML content', { component: "YamlConfigLoader", contentLength: yamlContent.length });
+      const config = SimpleYamlParser.parse(yamlContent) as YamlLLMConfig;
+      logger.info('Parsed YAML structure', { component: "YamlConfigLoader", config });
+
+      if (!config.llm || !config.llm.primary) {
+        throw new Error('Invalid YAML config: missing llm.primary section');
+      }
+
+      // Convert YAML config to LLMConfigStore format
+      const result: LLMConfigStore = {
+        primary: this.convertToLLMConfig(config.llm.primary),
+        fallbacks: (config.llm.fallbacks || []).map(f => this.convertToLLMConfig(f)),
+        preferences: {
+          autoFallback: config.llm.preferences?.autoFallback ?? true,
+          cacheResponses: config.llm.preferences?.cacheResponses ?? true,
+          timeoutMs: config.llm.preferences?.timeoutMs ?? 30000
+        }
+      };
+
+      logger.info('Converted config', { component: "YamlConfigLoader", primaryTimeout: result.primary.timeout });
+      // Apply environment variable overrides
+      this.applyEnvironmentOverrides(result);
+
+      return result;
+    } catch (error) {
+      logger.error('Failed to parse YAML config', { component: "YamlConfigLoader", error });
+      return null;
+    }
+  }
+
+  static async loadFromUrl(url: string): Promise<LLMConfigStore | null> {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch config: ${response.statusText}`);
+      }
+
+      const content = await response.text();
+      return this.loadFromString(content);
+    } catch (error) {
+      logger.error('Failed to load YAML config from URL', { component: "YamlConfigLoader", error });
+      return null;
+    }
+  }
+
+  static generateExampleConfig(): string {
+    return `# MeDeMAP LLM Configuration
+# This file configures Language Model providers for the AI assistant
+
+llm:
+  # Primary provider (first choice)
+  primary:
+    provider: ollama
+    model: gemma3:27b
+    baseUrl: http://localhost:11434
+    temperature: 0.1
+    maxTokens: 4000
+    timeout: 30000
+
+  # Fallback providers (tried if primary fails)
+  fallbacks:
+    - provider: openai
+      model: gpt-4-turbo-preview
+      baseUrl: https://api.openai.com/v1
+      apiKey: \${OPENAI_API_KEY}  # Environment variable
+      temperature: 0.1
+      maxTokens: 4000
+      timeout: 30000
+
+    - provider: claude
+      model: claude-3-5-sonnet-20241022
+      baseUrl: https://api.anthropic.com/v1
+      apiKey: \${ANTHROPIC_API_KEY}  # Environment variable
+      temperature: 0.1
+      maxTokens: 4000
+      timeout: 30000
+
+  # Global preferences
+  preferences:
+    autoFallback: true      # Try fallbacks if primary fails
+    cacheResponses: true    # Cache responses for performance
+    timeoutMs: 30000        # Global timeout in milliseconds
+
+# Environment Variables:
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+`;
+  }
+
+  private static convertToLLMConfig(yamlConfig: any): LLMConfig {
+    return {
+      provider: yamlConfig.provider,
+      model: yamlConfig.model,
+      baseUrl: yamlConfig.baseUrl,
+      apiKey: yamlConfig.apiKey,
+      temperature: yamlConfig.temperature ?? 0.1,
+      maxTokens: yamlConfig.maxTokens ?? 4000,
+      timeout: yamlConfig.timeout ?? 30000
+    };
+  }
+
+  private static applyEnvironmentOverrides(config: LLMConfigStore): void {
+    // Apply environment variable substitution
+    this.substituteEnvVars(config.primary);
+    config.fallbacks.forEach(fallback => this.substituteEnvVars(fallback));
+  }
+
+  private static substituteEnvVars(config: LLMConfig): void {
+    Object.keys(config).forEach(key => {
+      const value = (config as any)[key];
+      if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
+        const envVar = value.slice(2, -1);
+        const envValue = typeof process !== 'undefined' ? process.env?.[envVar] : undefined;
+        if (envValue) {
+          (config as any)[key] = envValue;
+        } else {
+          logger.warning(`Environment variable ${envVar} not found for ${key}`, { component: "YamlConfigLoader" });
+        }
+      }
+    });
+  }
+
+  // ============================================================================
+  // Development Helpers
+  // ============================================================================
+
+  static createDevConfig(): LLMConfigStore {
+    return this.loadFromString(this.generateExampleConfig())!;
+  }
+
+  static validateConfig(config: LLMConfigStore): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    if (!config.primary) {
+      errors.push('Missing primary provider configuration');
+    } else {
+      if (!config.primary.provider) errors.push('Primary provider missing provider field');
+      if (!config.primary.model) errors.push('Primary provider missing model field');
+    }
+
+    if (!config.preferences) {
+      errors.push('Missing preferences configuration');
+    }
+
+    // Validate each fallback
+    config.fallbacks?.forEach((fallback, index) => {
+      if (!fallback.provider) errors.push(`Fallback ${index} missing provider field`);
+      if (!fallback.model) errors.push(`Fallback ${index} missing model field`);
+    });
+
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
+}
+
+// ============================================================================
+// Browser File Upload Support
+// ============================================================================
+
+export class YamlConfigUploader {
+  static async loadFromFileUpload(file: File): Promise<LLMConfigStore | null> {
+    try {
+      const content = await this.readFileAsText(file);
+      return YamlConfigLoader.loadFromString(content);
+    } catch (error) {
+      logger.error('Failed to load config from uploaded file', { component: "YamlConfigLoader", error });
+      return null;
+    }
+  }
+
+  private static readFileAsText(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (e.target?.result) {
+          resolve(e.target.result as string);
+        } else {
+          reject(new Error('Failed to read file'));
+        }
+      };
+      reader.onerror = () => reject(new Error('File read error'));
+      reader.readAsText(file);
+    });
+  }
+
+  static downloadConfig(config: LLMConfigStore, filename = 'medemap-llm-config.yaml'): void {
+    const yamlContent = this.configToYaml(config);
+    const blob = new Blob([yamlContent], { type: 'text/yaml' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  private static configToYaml(config: LLMConfigStore): string {
+    const yamlLines: string[] = [
+      '# MeDeMAP LLM Configuration',
+      '# Generated configuration file',
+      '',
+      'llm:',
+      '  primary:',
+      `    provider: ${config.primary.provider}`,
+      `    model: ${config.primary.model}`,
+    ];
+
+    if (config.primary.baseUrl) yamlLines.push(`    baseUrl: ${config.primary.baseUrl}`);
+    if (config.primary.apiKey) yamlLines.push(`    apiKey: ${config.primary.apiKey}`);
+    if (config.primary.temperature !== undefined) yamlLines.push(`    temperature: ${config.primary.temperature}`);
+    if (config.primary.maxTokens) yamlLines.push(`    maxTokens: ${config.primary.maxTokens}`);
+    if (config.primary.timeout) yamlLines.push(`    timeout: ${config.primary.timeout}`);
+
+    if (config.fallbacks && config.fallbacks.length > 0) {
+      yamlLines.push('');
+      yamlLines.push('  fallbacks:');
+
+      config.fallbacks.forEach(fallback => {
+        yamlLines.push(`    - provider: ${fallback.provider}`);
+        yamlLines.push(`      model: ${fallback.model}`);
+        if (fallback.baseUrl) yamlLines.push(`      baseUrl: ${fallback.baseUrl}`);
+        if (fallback.apiKey) yamlLines.push(`      apiKey: ${fallback.apiKey}`);
+        if (fallback.temperature !== undefined) yamlLines.push(`      temperature: ${fallback.temperature}`);
+        if (fallback.maxTokens) yamlLines.push(`      maxTokens: ${fallback.maxTokens}`);
+        if (fallback.timeout) yamlLines.push(`      timeout: ${fallback.timeout}`);
+      });
+    }
+
+    yamlLines.push('');
+    yamlLines.push('  preferences:');
+    yamlLines.push(`    autoFallback: ${config.preferences.autoFallback}`);
+    yamlLines.push(`    cacheResponses: ${config.preferences.cacheResponses}`);
+    yamlLines.push(`    timeoutMs: ${config.preferences.timeoutMs}`);
+
+    return yamlLines.join('\n');
+  }
+}
